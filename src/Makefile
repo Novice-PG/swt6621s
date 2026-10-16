@@ -10,3 +10,9 @@
 obj-m += seekwaveplatform_lite/
 obj-m += swt6621s_wifi/
 obj-m += swtbt4l/
+
+# Kernels configured by a compiler that supports -fmin-function-alignment carry
+# CONFIG_CC_HAS_MIN_FUNCTION_ALIGNMENT=y and add the flag unconditionally for
+# out-of-tree module builds. Older target-distro compilers (e.g. Ubuntu 24.04's
+# gcc-13) reject it, so drop it when building the modules.
+KBUILD_CFLAGS := $(filter-out -fmin-function-alignment=%,$(KBUILD_CFLAGS))

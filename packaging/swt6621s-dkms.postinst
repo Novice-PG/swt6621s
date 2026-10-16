@@ -1,0 +1,29 @@
+#!/bin/sh
+set -e
+
+NAME="swt6621s"
+VERSION="@VERSION@"
+
+if ! command -v dkms >/dev/null 2>&1; then
+	echo "swt6621s-dkms: dkms is not available, skipping module build" >&2
+	exit 0
+fi
+
+dkms add -m "${NAME}" -v "${VERSION}" >/dev/null 2>&1 || true
+
+built=0
+for kdir in /lib/modules/*; do
+	[ -d "${kdir}" ] || continue
+	kver="${kdir##*/}"
+	[ -e "${kdir}/build/Makefile" ] || continue
+	echo "swt6621s-dkms: building for kernel ${kver} ..."
+	dkms build -m "${NAME}" -v "${VERSION}" -k "${kver}" || exit 1
+	dkms install -m "${NAME}" -v "${VERSION}" -k "${kver}" >/dev/null || exit 1
+	built=1
+done
+
+if [ "${built}" -eq 0 ]; then
+	echo "swt6621s-dkms: no kernel with headers found; module was not built" >&2
+fi
+
+exit 0

@@ -1,0 +1,17 @@
+# Build artifacts
+*.o
+*.ko
+*.mod
+*.mod.c
+.*.cmd
+*.symvers
+Module.symvers
+modules.order
+.tmp_versions/
+version.h
+
+# Package build directory
+.deb-build/
+
+# Packages
+*.deb

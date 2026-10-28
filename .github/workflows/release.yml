@@ -1,0 +1,38 @@
+name: release
+
+# Push a tag that matches PACKAGE_VERSION in dkms.conf (for example 1.0.3) and
+# this builds both packages on the runner and publishes them as release assets.
+on:
+  push:
+    tags:
+      - '*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  debs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the packages
+        run: ./packaging/build-debs.sh
+
+      - name: Check that the tag matches dkms.conf
+        run: |
+          built="$(dpkg-deb -f swt6621s-dkms_*_all.deb Version)"
+          if [ "${built}" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match PACKAGE_VERSION ${built} in dkms.conf" >&2
+            exit 1
+          fi
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sed "s/@VERSION@/${GITHUB_REF_NAME}/g" packaging/RELEASE-NOTES.md > notes.md
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "SWT6621S ${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            swt6621s-dkms_*_all.deb swt6621s-firmware_*_all.deb

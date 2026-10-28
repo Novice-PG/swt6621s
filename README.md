@@ -11,6 +11,8 @@ WiFi/BT driver stack, as used on the KickPi K2B V2 (Allwinner H618).
 | `firmware/` | Vendor firmware blobs (installed into `/lib/firmware/`) |
 | `dkms.conf` | DKMS configuration (three modules) |
 | `packaging/build-debs.sh` | Builds the `swt6621s-dkms` and `swt6621s-firmware` packages |
+| `packaging/RELEASE-NOTES.md` | Release notes, `@VERSION@` is replaced by the tag |
+| `.github/workflows/release.yml` | Builds and publishes the packages for a tag |
 
 The three modules built by DKMS are:
 
@@ -31,6 +33,18 @@ config when changing the build.
 
 This produces `swt6621s-dkms_<version>_all.deb` and
 `swt6621s-firmware_<version>_all.deb`. The version is read from `dkms.conf`.
+
+## Releasing
+
+Bump `PACKAGE_VERSION` in `dkms.conf`, commit, then push a matching tag:
+
+```
+git tag 1.0.3
+git push origin main 1.0.3
+```
+
+`.github/workflows/release.yml` builds both packages on the runner, refuses a
+tag that does not match `dkms.conf`, and publishes them as release assets.
 
 ## Building the modules manually
 

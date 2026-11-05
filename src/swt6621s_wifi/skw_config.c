@@ -370,12 +370,7 @@ static int skw_config_intf(struct skw_cfg_intf *intf, char *value)
 				break;
 			}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
-            strncpy(ifa->name, buff, IFNAMSIZ - 1);
-            ifa->name[IFNAMSIZ - 1] = '\0';
-#else
-			skw_strlcpy(ifa->name, buff, IFNAMSIZ);
-#endif
+			strscpy(ifa->name, buff, sizeof(ifa->name));
 
             break;
 
@@ -701,7 +696,8 @@ void skw_config_init(struct skw_config *conf)
 	conf->global.reorder_timeout = 100;
 
 	/* interface */
-	strcpy(conf->intf.interface[0].name, "wlan%d");
+	strscpy(conf->intf.interface[0].name, "wlan%d",
+		sizeof(conf->intf.interface[0].name));
 	conf->intf.interface[0].inst = SKW_INVALID_ID;
 	conf->intf.interface[0].iftype = NL80211_IFTYPE_STATION;
 
@@ -718,7 +714,7 @@ void skw_config_init(struct skw_config *conf)
 	conf->regd.country[1] = '0';
 
 	/* calib */
-	strcpy(conf->calib.project, "SEEKWAVE");
+	strscpy(conf->calib.project, "SEEKWAVE", sizeof(conf->calib.project));
 
 	INIT_LIST_HEAD(&conf->mib.init);
 	INIT_LIST_HEAD(&conf->mib.sta);
@@ -745,7 +741,8 @@ void skw_config_init(struct skw_config *conf)
 #ifdef CONFIG_SWT6621S_LEGACY_P2P
 	set_bit(SKW_CFG_FLAG_P2P_DEV, &conf->global.flags);
 
-	strcpy(conf->intf.interface[3].name, "p2p%d");
+	strscpy(conf->intf.interface[3].name, "p2p%d",
+		sizeof(conf->intf.interface[3].name));
 	conf->intf.interface[3].inst = 3;
 	conf->intf.interface[3].iftype = NL80211_IFTYPE_P2P_DEVICE;
 #endif
@@ -770,15 +767,19 @@ void skw_config_init(struct skw_config *conf)
 #endif
 
 #ifdef CONFIG_SWT6621S_CHIP_ID
-	if (strlen(CONFIG_SWT6621S_CHIP_ID))
-		strncpy(conf->calib.chip_alias_name, CONFIG_SWT6621S_CHIP_ID,
-			sizeof(conf->calib.chip_alias_name) - 1);
+	if (strlen(CONFIG_SWT6621S_CHIP_ID)) {
+		memset(conf->calib.chip_alias_name, 0, sizeof(conf->calib.chip_alias_name));
+		strscpy(conf->calib.chip_alias_name, CONFIG_SWT6621S_CHIP_ID,
+			sizeof(conf->calib.chip_alias_name));
+	}
 #endif
 
 #ifdef CONFIG_SWT6621S_PROJECT_NAME
-	if (strlen(CONFIG_SWT6621S_PROJECT_NAME))
-		strncpy(conf->calib.project, CONFIG_SWT6621S_PROJECT_NAME,
-			sizeof(conf->calib.project) - 1);
+	if (strlen(CONFIG_SWT6621S_PROJECT_NAME)) {
+		memset(conf->calib.project, 0, sizeof(conf->calib.project));
+		strscpy(conf->calib.project, CONFIG_SWT6621S_PROJECT_NAME,
+			sizeof(conf->calib.project));
+	}
 #endif
 
 #ifdef CONFIG_SWT6621S_WDS

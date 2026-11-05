@@ -11,6 +11,12 @@
 #ifndef __SWT6621S_CONFIG_H
 #define __SWT6621S_CONFIG_H
 
+#include <linux/version.h>
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 3, 0)
+#error "SWT6621S requires Linux 4.3 or newer"
+#endif
+
 /* Built-in symbols */
 #define CONFIG_SEEKWAVE_BSP_DRIVERS	1
 

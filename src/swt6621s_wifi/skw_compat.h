@@ -748,11 +748,4 @@ static inline long skw_simple_strtol(const char *cp, char **endp, unsigned int b
 	return negate ? -result : result;
 }
 
-/* strlcpy() was removed in Linux 6.8; strscpy() has the same signature. */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
-#define skw_strlcpy strscpy
-#else
-#define skw_strlcpy strlcpy
-#endif
-
 #endif

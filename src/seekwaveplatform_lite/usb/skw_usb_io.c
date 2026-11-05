@@ -1559,7 +1559,7 @@ int usb_port_async_entry(void *para)
 		data_flag = 2;
 
 	nr_sgs = mpc+1;
-	sgs = kzalloc((nr_sgs)*sizeof(struct scatterlist), GFP_KERNEL);
+	sgs = kcalloc(nr_sgs, sizeof(*sgs), GFP_KERNEL);
 	if (!sgs)
 		return -ENOMEM;
 	bulk_async_read = 0;
@@ -1715,7 +1715,9 @@ int skw_pin_config(struct usb_port_struct *port, char *buffer)
 	char result_str[15]; //e.g. PN:10:12345678
 	char off_str[3];
 
-	pin_val = (u32 *)kzalloc(PN_CNT * sizeof(u32), GFP_KERNEL);
+	pin_val = kcalloc(PN_CNT, sizeof(*pin_val), GFP_KERNEL);
+	if (!pin_val)
+		return -ENOMEM;
 
 	while (g_offset < usb_boot_data->nv_mem_pnfg_size) {
 		//1. pin offset
@@ -1782,7 +1784,7 @@ static int usb_loopcheck_entry(void *para)
 {
 	struct usb_port_struct *port = para;
 	char *buffer;
-	int read, size;
+	int read, size, ret;
 	int count= 0, timeout=300;
 	struct recovery_data *recovery = SKW_USB_GET_RECOVERY_DATA();
 	size = 512;
@@ -1890,7 +1892,9 @@ static int usb_loopcheck_entry(void *para)
 			bulkout_write_timeout(port->portno, buffer+256,9, &size, 300);
 			if (usb_boot_data->nv_mem_pnfg_data != NULL && usb_boot_data->nv_mem_pnfg_size != 0) {
 				skw_usb_info("UPDATE '%s' PINCFG from %s\n", skw_chipid, usb_boot_data->skw_nv_name);
-				skw_pin_config(port, buffer);
+				ret = skw_pin_config(port, buffer);
+				if (ret)
+					skw_usb_err("pin configuration failed: %d\n", ret);
 			}
 		}
 		wait_for_completion_interruptible_timeout(&loop_completion, msecs_to_jiffies(timeout));

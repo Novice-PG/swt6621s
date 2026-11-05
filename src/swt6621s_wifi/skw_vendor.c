@@ -281,7 +281,7 @@ static int skw_vendor_get_usable_channels(struct wiphy *wiphy,
 
 	max = ieee80211_get_num_supported_channels(wiphy);
 
-	chans = SKW_ZALLOC(max * sizeof(*chans), GFP_KERNEL);
+	chans = kcalloc(max, sizeof(*chans), GFP_KERNEL);
 	if (!chans)
 		return -ENOMEM;
 

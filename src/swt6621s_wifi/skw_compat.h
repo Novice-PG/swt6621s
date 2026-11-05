@@ -731,14 +731,13 @@ static inline void skw_compat_cac_event(struct net_device *dev,
 #endif
 }
 
+int skw_request_firmware(const struct firmware **fw, const char *name,
+			 struct device *dev, bool direct);
+
 static inline int skw_compat_request_firmware(const struct firmware **fw,
 			    const char *name, struct device *dev)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0)
-	return request_firmware_direct(fw, name, dev);
-#else
-	return request_firmware(fw, name, dev);
-#endif
+	return skw_request_firmware(fw, name, dev, true);
 }
 
 #endif

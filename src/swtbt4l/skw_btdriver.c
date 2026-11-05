@@ -38,6 +38,7 @@
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 #include <linux/firmware.h>
+#include <linux/skw_firmware.h>
 #include <linux/notifier.h>
 #include <linux/delay.h>
 #include <linux/version.h>
@@ -100,6 +101,9 @@ struct btseekwave_data
 
 struct btseekwave_data *skw_data = NULL;
 
+static char *firmware_dir = "";
+module_param(firmware_dir, charp, 0444);
+MODULE_PARM_DESC(firmware_dir, "Firmware subdirectory within the standard firmware search paths");
 
 void btseekwave_hci_hardware_error(struct hci_dev *hdev)
 {
@@ -527,15 +531,18 @@ int btseekwave_download_nv(struct hci_dev *hdev)
 
     if(SKW_CHIPID_6316 == chip_version)
     {
-        err = request_firmware(&fw, NV_FILE_NAME_6316, &hdev->dev);
+        err = skw_firmware_request(&fw, NV_FILE_NAME_6316, &hdev->dev,
+                                   firmware_dir, request_firmware);
     }
     else if(SKW_CHIPID_6160_LITE == chip_version)
     {
-        err = request_firmware(&fw, NV_FILE_NAME_6160_LITE, &hdev->dev);
+        err = skw_firmware_request(&fw, NV_FILE_NAME_6160_LITE, &hdev->dev,
+                                   firmware_dir, request_firmware);
     }
     else
     {
-        err = request_firmware(&fw, NV_FILE_NAME, &hdev->dev);
+        err = skw_firmware_request(&fw, NV_FILE_NAME, &hdev->dev,
+                                   firmware_dir, request_firmware);
     }
     if (err < 0)
     {

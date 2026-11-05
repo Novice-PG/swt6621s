@@ -29,6 +29,7 @@
 #include <linux/platform_device.h>
 #include <linux/if_tunnel.h>
 #include <linux/firmware.h>
+#include <linux/skw_firmware.h>
 #include <generated/utsrelease.h>
 #include <linux/suspend.h>
 
@@ -61,6 +62,17 @@ static u8 skw_mac[ETH_ALEN];
 static struct skw_global_config g_skw_config;
 
 static unsigned long skw_chip_idx = 0;
+
+static char *firmware_dir = "";
+module_param(firmware_dir, charp, 0444);
+MODULE_PARM_DESC(firmware_dir, "Firmware subdirectory within the standard firmware search paths");
+
+int skw_request_firmware(const struct firmware **fw, const char *name,
+			 struct device *dev, bool direct)
+{
+	return skw_firmware_request(fw, name, dev, firmware_dir,
+			direct ? request_firmware_direct : request_firmware);
+}
 
 static const int g_skw_up_to_ac[8] = {
 	SKW_WMM_AC_BE,
@@ -2357,7 +2369,7 @@ int skw_calib_download(struct wiphy *wiphy, const char *fname)
 
 	skw_chip_dbg(skw->idx, "fw file: %s\n", fname);
 
-	ret = request_firmware(&fw, fname, &wiphy->dev);
+	ret = skw_request_firmware(&fw, fname, &wiphy->dev, false);
 	if (ret) {
 		skw_chip_err(skw->idx, "load %s failed, ret: %d\n", fname, ret);
 		return ret;

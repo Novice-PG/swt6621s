@@ -32,6 +32,7 @@
 #include <linux/ctype.h>
 #include <linux/errno.h>
 #include <linux/firmware.h>
+#include <linux/skw_firmware.h>
 #include <linux/mmc/sdio_func.h>
 #include <linux/dma-mapping.h>
 #include <linux/cdev.h>
@@ -59,6 +60,11 @@ bool skw_boot_is_ready(void)
 }
 #endif
 static char *local_chip_id = "SV6160LITE";
+
+static char *firmware_dir = "";
+module_param(firmware_dir, charp, 0444);
+MODULE_PARM_DESC(firmware_dir, "Firmware subdirectory within the standard firmware search paths");
+
 #ifdef CONFIG_SKW_HOST_PLATFORM_NT
 int skw_use_sdma = 1;//1:sdma
 #else
@@ -154,7 +160,8 @@ static int skw_request_firmwares(struct seekwave_device *boot_data,
 	const struct firmware *fw = NULL;
 
 	skwboot_log("request_firmware %s\n", dram_image_name);
-	ret = request_firmware(&fw, dram_image_name, NULL);
+	ret = skw_firmware_request(&fw, dram_image_name, NULL,
+				   firmware_dir, request_firmware);
 	if (ret < 0) {
 		skwboot_err("request_firmware %s fail\n", dram_image_name);
 		goto ret;
@@ -178,7 +185,8 @@ static int skw_request_firmwares(struct seekwave_device *boot_data,
 	boot_data->dram_crc_val = crc_16_l_calc(boot_data->dram_img_data + boot_data->dram_crc_offset, boot_data->dram_dl_size);
 
 	skwboot_log("request_firmware %s\n", iram_image_name);
-	ret = request_firmware(&fw, iram_image_name, NULL);
+	ret = skw_firmware_request(&fw, iram_image_name, NULL,
+				   firmware_dir, request_firmware);
 	if (ret < 0) {
 		skwboot_err("request_firmware %s fail\n", iram_image_name);
 		goto ret;
@@ -209,7 +217,8 @@ static int skw_request_firmwares(struct seekwave_device *boot_data,
 		goto ret;
 	}
 	skwboot_log("request_firmware %s\n", nv_mem_name);
-	ret = firmware_request_nowarn(&fw, nv_mem_name, NULL);
+	ret = skw_firmware_request(&fw, nv_mem_name, NULL,
+				   firmware_dir, firmware_request_nowarn);
 	if (ret < 0) {
 		pr_debug("[SKWBOOT]: optional NV %s not present\n", nv_mem_name);
 		ret = ENOENT;

@@ -303,6 +303,9 @@ struct seekwave_device {
 void skw_boot_abort(void);
 void seekwave_boot_exit(void);
 int seekwave_boot_init(char *chip_id);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+bool skw_boot_is_ready(void);
+#endif
 int skw_ucom_init(void);
 void skw_ucom_exit(void);
 int skw_bind_boot_driver(struct device *dev);

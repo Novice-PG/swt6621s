@@ -26,6 +26,30 @@
 #include <linux/etherdevice.h>
 #include <linux/firmware.h>
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+#define skw_del_timer timer_delete
+#define skw_del_timer_sync timer_delete_sync
+#else
+#define skw_del_timer del_timer
+#define skw_del_timer_sync del_timer_sync
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+#define skw_cfg80211_del_sta(dev, ...) \
+	cfg80211_del_sta((dev)->ieee80211_ptr, __VA_ARGS__)
+#define skw_cfg80211_new_sta(dev, ...) \
+	cfg80211_new_sta((dev)->ieee80211_ptr, __VA_ARGS__)
+#else
+#define skw_cfg80211_del_sta cfg80211_del_sta
+#define skw_cfg80211_new_sta cfg80211_new_sta
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+#define skw_cac_started(wdev) ((wdev)->links[0].cac_started)
+#else
+#define skw_cac_started(wdev) ((wdev)->cac_started)
+#endif
+
 /* EID block */
 #define SKW_WLAN_EID_EXT_HE_CAPABILITY                            35
 #define SKW_WLAN_EID_EXT_HE_OPERATION                             36
@@ -346,7 +370,7 @@ static inline bool skw_compat_cfg80211_rx_mgmt(struct wireless_dev *wdev,
 
 static inline void *skw_pde_data(const struct inode *inode)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 17, 0)
 	return pde_data(inode);
 #else
 	return PDE_DATA(inode);
@@ -370,7 +394,7 @@ static inline void skw_compat_rx_assoc_resp(struct net_device *dev,
 			struct cfg80211_bss *bss, const u8 *buf, size_t len,
 			int uapsd, const u8 *req_ies, size_t req_ies_len)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 	struct cfg80211_rx_assoc_resp_data assoc_resp = {
 		.buf = buf,
 		.len = len,
@@ -507,7 +531,7 @@ static inline void skw_compat_rx_assoc_resp(struct net_device *dev,
 			struct cfg80211_bss *bss, const u8 *buf, size_t len,
 			int uapsd, const u8 *req_ies, size_t req_ies_len)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 	struct cfg80211_rx_assoc_resp_data assoc_resp = {
 		.buf = buf,
 		.len = len,
@@ -616,7 +640,10 @@ static inline void skw_compat_cfg80211_roamed(struct net_device *dev,
 static inline void skw_ch_switch_started_notify(struct net_device *dev,
 		struct cfg80211_chan_def *chandef, u8 count,  bool quiet)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0) && \
+	LINUX_VERSION_CODE < KERNEL_VERSION(6, 9, 0)
+	cfg80211_ch_switch_started_notify(dev, chandef, 0, count, quiet, 0);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 	cfg80211_ch_switch_started_notify(dev, chandef, 0, count, quiet);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
 	cfg80211_ch_switch_started_notify(dev, chandef, count, quiet);
@@ -629,7 +656,10 @@ static inline void skw_ch_switch_started_notify(struct net_device *dev,
 static inline void skw_ch_switch_notify(struct net_device *dev,
 		struct cfg80211_chan_def *chandef)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 2)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0) && \
+	LINUX_VERSION_CODE < KERNEL_VERSION(6, 9, 0)
+	cfg80211_ch_switch_notify(dev, chandef, 0, 0);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 2)
 	cfg80211_ch_switch_notify(dev, chandef, 0);
 #else
 	cfg80211_ch_switch_notify(dev, chandef);
@@ -685,6 +715,19 @@ static inline void skw_compat_netif_napi_add_weight(struct net_device *dev,
 	netif_napi_add_weight(dev, napi, poll, weight);
 #else
 	netif_napi_add(dev, napi, poll, weight);
+#endif
+}
+
+static inline void skw_compat_cac_event(struct net_device *dev,
+		const struct cfg80211_chan_def *chandef,
+		enum nl80211_radar_event event, gfp_t gfp)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	cfg80211_cac_event(dev, chandef, event, gfp, 0);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
+	cfg80211_cac_event(dev, chandef, event, gfp);
+#else
+	cfg80211_cac_event(dev, event, gfp);
 #endif
 }
 

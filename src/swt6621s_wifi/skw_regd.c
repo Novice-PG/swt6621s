@@ -61,7 +61,15 @@ static ssize_t skw_regd_write(struct file *fp, const char __user *buf,
 		return size;
 	}
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	rtnl_lock();
+	wiphy_lock(wiphy);
+#endif
 	ret = skw_set_regdom(wiphy, (char *)country);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	wiphy_unlock(wiphy);
+	rtnl_unlock();
+#endif
 	if (ret)
 		skw_chip_err(skw->idx, "set country failed, ret: %d\n", ret);
 

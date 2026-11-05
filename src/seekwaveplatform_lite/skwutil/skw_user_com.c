@@ -495,7 +495,7 @@ static int skw_ucom_probe(struct platform_device *pdev)
 	return -EINVAL;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 static void skw_ucom_remove(struct platform_device *pdev)
 #else
 static int skw_ucom_remove(struct platform_device *pdev)
@@ -567,7 +567,7 @@ static int skw_ucom_remove(struct platform_device *pdev)
 		class_destroy(skw_com_class);
 		skw_com_class = NULL;
 	}
-	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 	return;
 	#else
 	return 0;

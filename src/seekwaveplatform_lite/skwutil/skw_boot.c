@@ -50,6 +50,14 @@ unsigned char dl_signal_acount=0;
 struct platform_device *btboot_pdev;
 static u64 port_dmamask = DMA_BIT_MASK(32);
 static struct mutex boot_mutex;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+static bool skw_boot_ready;
+
+bool skw_boot_is_ready(void)
+{
+	return smp_load_acquire(&skw_boot_ready);
+}
+#endif
 static char *local_chip_id = "SV6160LITE";
 #ifdef CONFIG_SKW_HOST_PLATFORM_NT
 int skw_use_sdma = 1;//1:sdma
@@ -452,6 +460,10 @@ static int seekwave_boot_probe(struct  platform_device *pdev)
 	}
 	boot_data->pdev = pdev;
 	ret = skw_first_boot(boot_data);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+	/* Child probes may run before the initial firmware download completes. */
+	smp_store_release(&skw_boot_ready, !ret);
+#endif
 	if (ret) {
 		skw_boot_abort();
 		goto free_images;
@@ -477,13 +489,16 @@ free_boot_data:
  *Date:
  *Modify:
  **************************************************************************/
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 static void seekwave_boot_remove(struct  platform_device *pdev)
 #else
 static int seekwave_boot_remove(struct  platform_device *pdev)
 #endif
 {
 	skwboot_log("%s the Enter \n", __func__);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+	smp_store_release(&skw_boot_ready, false);
+#endif
 
 	if (btboot_pdev) {
 		platform_device_unregister(btboot_pdev);
@@ -525,7 +540,7 @@ static int seekwave_boot_remove(struct  platform_device *pdev)
 		skwboot_err("%s:boot_data is NULL\n", __func__);
 	}
 	mutex_destroy(&boot_mutex);
-	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 	return;
 	#else
 	return 0;

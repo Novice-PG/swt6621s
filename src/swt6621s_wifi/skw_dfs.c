@@ -505,24 +505,35 @@ int skw_dfs_add_pulse(struct wiphy *wiphy, struct net_device *dev, struct skw_pu
 	return 0;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+static void skw_dfs_cac_work(struct wiphy *wiphy, struct wiphy_work *work)
+{
+	struct skw_iface *iface = container_of(work, struct skw_iface,
+					     sap.dfs.cac_work.work);
+#else
 static void skw_dfs_cac_work(struct work_struct *work)
 {
 	struct delayed_work *dwk = to_delayed_work(work);
 	struct skw_iface *iface = container_of(dwk, struct skw_iface,
 						sap.dfs.cac_work);
+#endif
 
 	skw_chip_dbg(iface->skw->idx, "dev: %s finished\n", netdev_name(iface->ndev));
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
 	skw_wdev_lock(&iface->wdev);
+#endif
 
-	if (iface->wdev.cac_started) {
+	if (skw_cac_started(&iface->wdev)) {
 		skw_dfs_stop_cac(priv_to_wiphy(iface->skw), iface->ndev);
 
-		cfg80211_cac_event(iface->ndev, &iface->skw->dfs.chan,
+		skw_compat_cac_event(iface->ndev, &iface->skw->dfs.chan,
 				NL80211_RADAR_CAC_FINISHED, GFP_KERNEL);
 	}
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
 	skw_wdev_unlock(&iface->wdev);
+#endif
 }
 
 int skw_dfs_chan_init(struct wiphy *wiphy, struct net_device *dev,
@@ -685,7 +696,11 @@ int skw_dfs_init(struct wiphy *wiphy, struct net_device *dev)
 	BUILD_BUG_ON(IS_ENABLED(CONFIG_SWT6621S_REGD_SELF_MANAGED));
 
 	iface->sap.dfs.flags = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	wiphy_delayed_work_init(&iface->sap.dfs.cac_work, skw_dfs_cac_work);
+#else
 	INIT_DELAYED_WORK(&iface->sap.dfs.cac_work, skw_dfs_cac_work);
+#endif
 
 	for (i = 0; i < ARRAY_SIZE(skw_radar_infos); i++) {
 		const struct skw_radar_info *info = &skw_radar_infos[i];
@@ -707,11 +722,15 @@ int skw_dfs_deinit(struct wiphy *wiphy, struct net_device *dev)
 
 	if (test_bit(SKW_DFS_FLAG_CAC_MODE, &iface->sap.dfs.flags)) {
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+		wiphy_delayed_work_cancel(wiphy, &iface->sap.dfs.cac_work);
+#else
 		cancel_delayed_work_sync(&iface->sap.dfs.cac_work);
+#endif
 
 		skw_dfs_stop_cac(wiphy, dev);
 
-		cfg80211_cac_event(dev, &skw->dfs.chan,
+		skw_compat_cac_event(dev, &skw->dfs.chan,
 				NL80211_RADAR_CAC_ABORTED, GFP_KERNEL);
 	}
 

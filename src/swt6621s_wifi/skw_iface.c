@@ -327,13 +327,21 @@ void skw_purge_survey_data(struct skw_iface *iface)
 	}
 }
 
-void skw_iface_event_work(struct work_struct *work)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+static void skw_iface_event_work(struct wiphy *wiphy, struct wiphy_work *work)
+#else
+static void skw_iface_event_work(struct work_struct *work)
+#endif
 {
 	struct sk_buff *skb;
 	struct skw_msg *msg_hdr;
 	struct skw_iface *iface;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	iface = container_of(work, struct skw_iface, event_work.wiphy_work);
+#else
 	iface = container_of(work, struct skw_iface, event_work.work);
+#endif
 
 	while ((skb = skb_dequeue(&iface->event_work.qlist))) {
 		msg_hdr = (struct skw_msg *)skb->data;
@@ -426,7 +434,11 @@ static void skw_release_inst(struct wiphy *wiphy, int id)
 	spin_unlock_bh(&skw->vif.lock);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+static void skw_sta_work(struct wiphy *wiphy, struct wiphy_work *wk)
+#else
 static void skw_sta_work(struct work_struct *wk)
+#endif
 {
 	bool run_again = false;
 	bool connect_failed = false;
@@ -434,10 +446,14 @@ static void skw_sta_work(struct work_struct *wk)
 	struct skw_iface *iface = container_of(wk, struct skw_iface, sta.work);
 	struct net_device *ndev = iface->ndev;
 	struct skw_sta_core *core = &iface->sta.core;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
 	struct wiphy *wiphy = priv_to_wiphy(iface->skw);
+#endif
 	struct skw_core *skw = wiphy_priv(wiphy);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
 	skw_wdev_lock(&iface->wdev);
+#endif
 
 	skw_chip_dbg(iface->skw->idx, "inst: %d, state: %s, retry: %d jiff: %d step_start: %d ctx_start: %d auth_start: %d redo:%d\n",
 		core->sm.inst, skw_state_name(core->sm.state),
@@ -608,14 +624,20 @@ static void skw_sta_work(struct work_struct *wk)
 	if (run_again)
 		skw_set_sta_timer(core, SKW_STEP_TIMEOUT);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
 	skw_wdev_unlock(&iface->wdev);
+#endif
 }
 
 static void skw_sta_timer(struct timer_list *t)
 {
 	struct skw_iface *iface = skw_from_timer(iface, t, sta.core.timer);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	wiphy_work_queue(iface->wdev.wiphy, &iface->sta.work);
+#else
 	queue_work(iface->skw->event_wq, &iface->sta.work);
+#endif
 }
 
 void skw_set_sta_timer(struct skw_sta_core *core, unsigned long timeout)
@@ -661,7 +683,11 @@ static int skw_mode_init(struct wiphy *wiphy, struct skw_iface *iface,
 		core->sm.state = SKW_STATE_NONE;
 		core->sm.addr = core->bss.bssid;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+		wiphy_work_init(&iface->sta.work, skw_sta_work);
+#else
 		INIT_WORK(&iface->sta.work, skw_sta_work);
+#endif
 		skw_compat_setup_timer(&core->timer, skw_sta_timer);
 
 		iface->sta.conn = NULL;
@@ -756,8 +782,12 @@ static void skw_mode_deinit(struct wiphy *wiphy, struct skw_iface *iface,
 			SKW_KFREE(iface->sta.conn);
 		}
 
-		timer_delete_sync(&iface->sta.core.timer);
+		skw_del_timer_sync(&iface->sta.core.timer);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+		wiphy_work_cancel(wiphy, &iface->sta.work);
+#else
 		cancel_work_sync(&iface->sta.work);
+#endif
 
 		skw_set_state(skw, &iface->sta.core.sm, SKW_STATE_NONE);
 		SKW_KFREE(iface->sta.core.pending.auth_cmd);
@@ -803,7 +833,13 @@ int skw_iface_setup(struct wiphy *wiphy, struct net_device *dev,
 		RCU_INIT_POINTER(iface->key_conf.key[i], NULL);
 	}
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	skb_queue_head_init(&iface->event_work.qlist);
+	wiphy_work_init(&iface->event_work.wiphy_work, skw_iface_event_work);
+	atomic_set(&iface->event_work.enabled, 1);
+#else
 	skw_event_work_init(&iface->event_work, skw_iface_event_work);
+#endif
 
 	for (i = 0; i < SKW_MAX_DEFRAG_ENTRY; i++) {
 		iface->frag[i].id = i;
@@ -916,7 +952,13 @@ int skw_iface_teardown(struct wiphy *wiphy, struct skw_iface *iface)
 		iface->frag[i].tid = SKW_INVALID_ID;
 	}
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	skw_event_work_disable(&iface->event_work);
+	wiphy_work_cancel(wiphy, &iface->event_work.wiphy_work);
+	skb_queue_purge(&iface->event_work.qlist);
+#else
 	skw_event_work_deinit(&iface->event_work);
+#endif
 
 	skw_mode_deinit(wiphy, iface, iface->wdev.iftype);
 

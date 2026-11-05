@@ -93,7 +93,7 @@ struct skw_pulse_data {
 struct skw_radar_pulse {
 	u8 nr_pulse;
 	u8 resv;
-	struct skw_pulse_data data[0];
+	struct skw_pulse_data data[];
 } __packed;
 
 struct skw_pulse_info {

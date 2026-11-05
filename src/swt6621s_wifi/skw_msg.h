@@ -244,7 +244,7 @@ struct skw_msg {
 	u16 seq;
 	u16 total_len;
 	u8 resv[2];
-	u16 data[0];
+	u16 data[];
 };
 
 struct skw_mgmt_hdr {
@@ -253,7 +253,7 @@ struct skw_mgmt_hdr {
 	s16 signal;
 	u16 mgmt_len;
 	u16 resv;
-	struct ieee80211_mgmt mgmt[0];
+	struct ieee80211_mgmt mgmt[];
 } __packed;
 
 struct skw_tx_mgmt_status {
@@ -342,7 +342,7 @@ struct skw_frame_tx_status {
 	u8 status;
 	u8 resv;
 	u16 mgmt_len;
-	struct ieee80211_mgmt mgmt[0];
+	struct ieee80211_mgmt mgmt[];
 } __packed;
 
 
@@ -364,7 +364,7 @@ struct skw_pkt_pattern {
 	u8 type_offset;
 	u16 offset;
 	u8 len;
-	u8 val[0];
+	u8 val[];
 } __packed;
 
 #define SKW_MAX_WOW_USER_RULE_LEN      128
@@ -379,7 +379,7 @@ struct skw_wow_rule {
 struct skw_wow_input_param {
 	u32 wow_flags;
 	u8 rule_num;
-	struct skw_wow_rule rules[0];
+	struct skw_wow_rule rules[];
 } __packed;
 
 struct skw_wow_rules_set {

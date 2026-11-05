@@ -808,16 +808,16 @@ static int skw_set_android_suspend(struct wiphy *wiphy, struct net_device *dev,
 {
 	int ret = 0;
 	long val = 0;
-	char *endp = NULL;
 
 	skw_dbg("data: %s\n", suspend);
 
-	val = skw_simple_strtol(suspend, &endp, 0);
-	if (*endp != '\0' || (val != 0 && val != 1)) {
-		skw_err("endp: %d, val: %ld\n", *endp, val);
-
+	if (!suspend)
 		return -EINVAL;
-	}
+	ret = kstrtol(suspend, 0, &val);
+	if (ret)
+		return ret;
+	if (val != 0 && val != 1)
+		return -EINVAL;
 
 #ifdef CONFIG_SWT6621S_PRESUSPEND_SUPPORT
 	ret = skw_set_mib_bool(wiphy, SKW_NDEV_ID(dev),

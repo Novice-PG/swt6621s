@@ -18,13 +18,12 @@
 
 #include <linux/interrupt.h>
 #include <linux/irq.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/kthread.h>
 #include <linux/version.h>
 #include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/of_device.h>
-#include <linux/of_gpio.h>
 #include <linux/pm_runtime.h>
 #include <linux/mmc/card.h>
 #include <linux/mmc/core.h>
@@ -39,7 +38,6 @@ int bind_device=0;
 
 extern unsigned int test_debug;
 extern int skw_use_sdma;
-extern int g_chipen_pin;
 extern struct sv6160_platform_data ucom_pdata;
 extern struct sv6160_platform_data wifi_pdata;
 extern struct sdio_port sdio_ports[];
@@ -66,10 +64,12 @@ static int skw_sdio_cp_service_ops(int service_ops);
 static int skw_sdio_cpdebug_boot(void);
 struct skw_sdio_data_t *g_skw_sdio_data;
 static struct sdio_driver skw_sdio_driver;
+static bool sdio_registered;
 static struct mutex dloader_mutex;
 static int skw_sdio_set_dma_type(unsigned int address, unsigned int dma_type);
 static int skw_sdio_slp_feature_en(unsigned int address, unsigned int slp_en);
-static int skw_sdio_host_irq_init(unsigned int irq_gpio_num);
+static int skw_sdio_host_irq_init(void);
+static void skw_sdio_stop_thread(void);
 static int skw_WIFI_service_start(void);
 static int skw_WIFI_service_stop(void);
 static int skw_BT_service_start(void);
@@ -146,7 +146,8 @@ void skw_resume_check(void)
 	unsigned int timeout;
 
 	timeout = 0;
-	while((!atomic_read(&skw_sdio->resume_flag)) && (timeout++ < 20000))
+	while (!atomic_read(&skw_sdio->threads_exit) &&
+	       !atomic_read(&skw_sdio->resume_flag) && timeout++ < 20000)
 		usleep_range(1500, 2000);
 }
 
@@ -248,35 +249,61 @@ void *skw_get_bus_dev(void)
 irqreturn_t skw_host_wake_irq_handler(int irq, void *dev_id) //interrupt
 {
 	struct skw_sdio_data_t *skw_sdio = skw_sdio_get_data();
-	int	value = gpio_get_value(skw_sdio->gpio_in);
+	int	value = gpiod_get_value(skw_sdio->host_wake);
 
 	skw_sdio_dbg("gpio request_irq=%d  GPIO value %d!\n", irq, value);
 	return IRQ_HANDLED;
 }
 
-static int skw_sdio_host_wake_irq_init(unsigned int gpio_num)
+static void skw_sdio_free_host_irq(struct skw_sdio_data_t *skw_sdio)
+{
+	if (skw_sdio->irq_num < 0)
+		return;
+	if (skw_sdio->irq_wake_enabled) {
+		disable_irq_wake(skw_sdio->irq_num);
+		skw_sdio->irq_wake_enabled = false;
+	}
+	free_irq(skw_sdio->irq_num, NULL);
+	skw_sdio->irq_num = -1;
+}
+
+static int skw_sdio_request_host_irq(irq_handler_t handler)
 {
 	struct skw_sdio_data_t *skw_sdio = skw_sdio_get_data();
-	int ret = 0;
+	unsigned long flags;
+	int irq, ret;
 
-	skw_sdio->device_active = gpio_get_value(skw_sdio->gpio_in);
-	skw_sdio->irq_num = gpio_to_irq(skw_sdio->gpio_in);
-	skw_sdio->irq_trigger_type = IRQF_TRIGGER_RISING;
-	skw_sdio_info("gpio_irq %d\n", skw_sdio->irq_num);
-	if (skw_sdio->irq_num) {
-		ret = request_irq(skw_sdio->irq_num, skw_host_wake_irq_handler,
-				skw_sdio->irq_trigger_type | IRQF_ONESHOT, "skw-gpio-irq", NULL);
-		if (ret != 0) {
-			free_irq(skw_sdio->irq_num, NULL);
-			skw_sdio_err("%s request gpio irq fail ret=%d\n", __func__, ret);
-			return -1;
-		} else {
-			skw_sdio_dbg("gpio request_irq=%d  GPIO value %d!\n",
-					skw_sdio->irq_num, skw_sdio->device_active);
-		}
+	if (!skw_sdio->host_wake)
+		return -ENODEV;
+	if (skw_sdio->irq_num >= 0)
+		return 0;
+	ret = gpiod_get_value(skw_sdio->host_wake);
+	if (ret < 0)
+		return ret;
+	skw_sdio->device_active = ret;
+
+	irq = gpiod_to_irq(skw_sdio->host_wake);
+	if (irq < 0)
+		return irq;
+	flags = gpiod_is_active_low(skw_sdio->host_wake) ?
+		IRQF_TRIGGER_FALLING : IRQF_TRIGGER_RISING;
+	ret = request_irq(irq, handler, flags, "skw-host-wake", NULL);
+	if (ret)
+		return ret;
+
+	skw_sdio->irq_num = irq;
+	ret = enable_irq_wake(irq);
+	if (ret) {
+		skw_sdio_free_host_irq(skw_sdio);
+		return ret;
 	}
-	enable_irq_wake(skw_sdio->irq_num);
-	return ret;
+	skw_sdio->irq_wake_enabled = true;
+	return 0;
+}
+
+static int skw_sdio_host_wake_irq_init(void)
+{
+	return skw_sdio_request_host_irq(skw_host_wake_irq_handler);
 }
 
 int skw_sdio_gpio_irq_pre_ops(void)
@@ -287,13 +314,12 @@ int skw_sdio_gpio_irq_pre_ops(void)
 	if (!skw_sdio->boot_data)
 		return -1;
 
-	skw_sdio->gpio_in = skw_sdio->boot_data->gpio_in;
-	skw_sdio->gpio_out = skw_sdio->boot_data->gpio_out;
-	if (skw_sdio->boot_data->gpio_in < 0 ||
-	    skw_sdio->boot_data->gpio_out < 0) {
-		if (skw_sdio->boot_data->gpio_in >= 0)
-			ret = skw_sdio_host_wake_irq_init(
-				skw_sdio->boot_data->gpio_in);
+	skw_sdio->host_wake = skw_sdio->boot_data->host_wake;
+	skw_sdio->chip_wake = skw_sdio->boot_data->chip_wake;
+	if (!skw_sdio->boot_data->host_wake ||
+	    !skw_sdio->boot_data->chip_wake) {
+		if (skw_sdio->boot_data->host_wake)
+			ret = skw_sdio_host_wake_irq_init();
 		skw_sdio_warn(" no support gpio irq!!!\n");
 		return ret;
 	}
@@ -306,19 +332,19 @@ int skw_sdio_gpio_irq_pre_ops(void)
 		sdio_claim_host(func);
 		sdio_release_irq(func);
 		sdio_release_host(func);
-		ret = skw_sdio_host_irq_init(skw_sdio->gpio_in);
+		ret = skw_sdio_host_irq_init();
 		break;
 	case 3:
-		gpio_set_value(skw_sdio->gpio_out, 0);
+		gpiod_set_value(skw_sdio->chip_wake, 0);
 		msleep(100);
 		loopcheck_send_data("APGPIORDY", 9);
 		msleep(5);
-		gpio_set_value(skw_sdio->gpio_out, 1);
+		gpiod_set_value(skw_sdio->chip_wake, 1);
 		func = skw_sdio->sdio_func[FUNC_1];
 		sdio_claim_host(func);
 		sdio_release_irq(func);
 		sdio_release_host(func);
-		ret = skw_sdio_host_irq_init(skw_sdio->gpio_in);
+		ret = skw_sdio_host_irq_init();
 		break;
 	default:
 		break;
@@ -405,8 +431,14 @@ int skw_sdio_adma_write(int portno, struct scatterlist *sgs, int sg_count, int t
 	if (ret) {
 		skw_sdio_abort(ret);
 	} else {
-		if (skw_sdio->device_active==0 && skw_sdio->irq_type && skw_sdio->gpio_in >= 0)
-			skw_sdio->device_active = gpio_get_value(skw_sdio->gpio_in);
+		if (!skw_sdio->device_active && skw_sdio->irq_type && skw_sdio->host_wake) {
+			int value = gpiod_get_value(skw_sdio->host_wake);
+
+			if (value < 0)
+				ret = value;
+			else
+				skw_sdio->device_active = value;
+		}
 	}
 	skw_sdio_transfer_exit();
 
@@ -692,33 +724,17 @@ int skw_sdio_writeb(unsigned int address, unsigned char value)
 	return err;
 }
 
-static int skw_sdio_host_irq_init(unsigned int irq_gpio_num)
+static int skw_sdio_host_irq_init(void)
 {
 	struct skw_sdio_data_t *skw_sdio = skw_sdio_get_data();
-	int ret = 0;
+	int ret;
 
 	skw_sdio->irq_type = SKW_SDIO_EXTERNAL_IRQ;
-	skw_sdio->device_active = gpio_get_value(skw_sdio->gpio_in);
-	skw_sdio->irq_num = gpio_to_irq(skw_sdio->gpio_in);
-	skw_sdio->irq_trigger_type = IRQF_TRIGGER_RISING;
-	skw_sdio_info("gpio_In:%d,gpio_out:%d irq %d\n",skw_sdio->gpio_in,
-		skw_sdio->gpio_out, skw_sdio->irq_num);
-	if (skw_sdio->irq_num) {
-		ret = request_irq(skw_sdio->irq_num, skw_gpio_irq_handler,
-				skw_sdio->irq_trigger_type | IRQF_ONESHOT, "skw-gpio-irq", NULL);
-		if (ret != 0) {
-			free_irq(skw_sdio->irq_num, NULL);
-			skw_sdio_err(" request gpio irq fail ret=%d\n", ret);
-			return -1;
-		} else {
-			skw_sdio->device_active = gpio_get_value(skw_sdio->gpio_in);
-			skw_sdio_info("gpio request_irq=%d  GPIO value %d!\n",
-					skw_sdio->irq_num, skw_sdio->device_active);
-		}
-	}
-	enable_irq_wake(skw_sdio->irq_num);
+	ret = skw_sdio_request_host_irq(skw_gpio_irq_handler);
+	if (ret)
+		return ret;
 	skw_sdio_rx_up(skw_sdio);
-	return ret;
+	return 0;
 }
 
 static int skw_sdio_get_dev_func(struct sdio_func *func)
@@ -923,7 +939,10 @@ irqreturn_t skw_gpio_irq_handler(int irq, void *dev_id) //interrupt
 {
 	struct skw_sdio_data_t *skw_sdio = skw_sdio_get_data();
 
-	int value = gpio_get_value(skw_sdio->gpio_in);
+	int value = gpiod_get_value(skw_sdio->host_wake);
+
+	if (value < 0)
+		return IRQ_HANDLED;
 	//skw_sdio_info("debug ----line[%d]- cp active[%d]--enter\n", __LINE__,value);
 	if (!debug_infos.cp_assert_time) {
 		debug_infos.last_irq_time = skw_local_clock();
@@ -931,7 +950,7 @@ irqreturn_t skw_gpio_irq_handler(int irq, void *dev_id) //interrupt
 		debug_infos.rx_gpio_irq_cnt++;
 		skw_sdio_dbg("irq coming %d\n", debug_infos.rx_gpio_irq_cnt);
 	}
-	if (!SKW_CARD_ONLINE(skw_sdio)) {
+	if (atomic_read(&skw_sdio->threads_exit) || !SKW_CARD_ONLINE(skw_sdio)) {
 		skw_sdio_err("%s card offline\n", __func__);
 		return IRQ_HANDLED;
 	}
@@ -943,7 +962,7 @@ irqreturn_t skw_gpio_irq_handler(int irq, void *dev_id) //interrupt
 	if (value && (skw_sdio->irq_type == SKW_SDIO_EXTERNAL_IRQ)){
 		skw_sdio_rx_up(skw_sdio);
 	 }
-	host_gpio_in_routine(value);
+	skw_host_wake_changed(value);
 	return IRQ_HANDLED;
 }
 
@@ -954,8 +973,8 @@ static int skw_check_cp_ready(void)
 		msecs_to_jiffies(2000)) == 0) {
 		skw_sdio_err("CP-ready timeout, kick RXTHREAD\n");
 		skw_sdio_rx_up(skw_sdio);
-		if(skw_sdio->chip_en >= 0)
-			skw_sdio_info("chip_en:%d\n", gpio_get_value(skw_sdio->chip_en));
+		if(skw_sdio->enable_gpio)
+			skw_sdio_info("enable_gpio:%d\n", gpiod_get_value(skw_sdio->enable_gpio));
 		return -ETIME;
 	}
 	return 0;
@@ -964,12 +983,14 @@ static void skw_sdio_launch_thread(void)
 {
 	struct skw_sdio_data_t *skw_sdio = skw_sdio_get_data();
 
+	atomic_set(&skw_sdio->threads_exit, 0);
 	init_completion(&skw_sdio->rx_completed);
 	skw_sdio_wakeup_source_init(skw_sdio);
 	skw_sdio->rx_thread =
 		kthread_create(skw_sdio_rx_thread, NULL, "skw_sdio_rx_thread");
 	if (IS_ERR(skw_sdio->rx_thread)) {
 		skw_sdio_err("creat skw_sdio_rx_thread fail\n");
+		skw_sdio->rx_thread = NULL;
 		return;
 	}
 	if (skw_sdio->rx_thread) {
@@ -1090,32 +1111,36 @@ static void skw_sdio_remove(struct sdio_func *func)
 	skw_sdio_info("Enter\n");
 
 	complete(&skw_sdio->remove_done);
+	skw_sdio_stop_thread();
 
 	if (skw_sdio->irq_type == SKW_SDIO_INBAND_IRQ) {
 		sdio_claim_host(skw_sdio->sdio_func[FUNC_1]);
 		sdio_release_irq(skw_sdio->sdio_func[FUNC_1]);
 		sdio_release_host(skw_sdio->sdio_func[FUNC_1]);
 	}
-	if (skw_sdio->irq_num >= 0)
-		free_irq(skw_sdio->irq_num, NULL);
+	skw_sdio_free_host_irq(skw_sdio);
+	cancel_delayed_work_sync(&skw_sdio->skw_except_work);
+	skw_sdio_unlock_rx_ws(skw_sdio);
+	skw_sdio_wakeup_source_destroy(skw_sdio);
 
 	skw_sdio->host_active = 0;
 	skw_sdio_unbind_platform_driver(skw_sdio->sdio_func[FUNC_1]);
 	skw_sdio_unbind_WIFI_driver(skw_sdio->sdio_func[FUNC_1]);
 	skw_sdio_unbind_BT_driver(skw_sdio->sdio_func[FUNC_1]);
 	kfree(skw_sdio->sdio_func[FUNC_0]);
+	skw_sdio->sdio_func[FUNC_0] = NULL;
+	skw_sdio->sdio_func[FUNC_1] = NULL;
 }
 
-void skw_sdio_stop_thread(void)
+static void skw_sdio_stop_thread(void)
 {
 	struct skw_sdio_data_t *skw_sdio = skw_sdio_get_data();
 
+	atomic_set(&skw_sdio->threads_exit, 1);
 	if (skw_sdio->rx_thread) {
-		atomic_set(&skw_sdio->threads_exit, 1);
 		skw_sdio_rx_up(skw_sdio);
 		kthread_stop(skw_sdio->rx_thread);
 		skw_sdio->rx_thread = NULL;
-		skw_sdio_wakeup_source_destroy(skw_sdio);
 	}
 	skw_sdio_info("done\n");
 }
@@ -1146,11 +1171,28 @@ void skw_sdio_remove_card(void)
 {
 	struct skw_sdio_data_t *skw_sdio = skw_sdio_get_data();
 
+	if (!sdio_registered)
+		return;
+	sdio_registered = false;
 	sdio_unregister_driver(&skw_sdio_driver);
 	skw_sdio_info(" sdio_unregister_driver: %s\n", skw_sdio_driver.name);
 	wait_for_completion_timeout(&skw_sdio->remove_done, msecs_to_jiffies(100));
 	skw_sdio_info("remove card end\n");
 
+}
+
+void skw_boot_abort(void)
+{
+	struct skw_sdio_data_t *skw_sdio = skw_sdio_get_data();
+
+	skw_sdio_debugfs_deinit();
+	skw_sdio_stop_thread();
+	skw_sdio_remove_card();
+	cancel_delayed_work_sync(&skw_sdio->skw_except_work);
+	skw_sdio->host_wake = NULL;
+	skw_sdio->chip_wake = NULL;
+	skw_sdio->enable_gpio = NULL;
+	skw_sdio->boot_data = NULL;
 }
 
 int skw_sdio_scan_card(void)
@@ -1175,6 +1217,9 @@ int skw_sdio_scan_card(void)
 		if (ret)
 			skw_sdio_err("sdio_register_driver error :%d\n", ret);
 	}
+	if (ret)
+		return ret;
+	sdio_registered = true;
 	if (wait_for_completion_timeout(&skw_sdio->scan_done, msecs_to_jiffies(1000)) == 0) {
 		skw_sdio_err("wait scan card time out\n");
 		return -ENODEV;
@@ -1287,8 +1332,8 @@ static int skw_sdio_boot_cp(int boot_mode)
 
 #if !defined(SKW_BOOT_MEMPOWERON)
 	if(!ret&&boot_mode==SKW_FIRST_BOOT) {
-		if(skw_sdio->chip_en < 0)
-			skw_sdio_warn("chip_en:%d Invalid Pls check HW !!\n", skw_sdio->chip_en);
+		if(!skw_sdio->enable_gpio)
+			skw_sdio_warn("chip-en GPIO is not configured\n");
 		ret = skw_sdio_host_check(skw_sdio);
 		ret |= skw_sdio_chk_cp_gpio_cfg();//check the cp gpio cfg
 		if (ret < 0)
@@ -1628,20 +1673,18 @@ int skw_sdio_chk_cp_gpio_cfg(void)
 	int ret = 0;
 	unsigned char exti_val = 0;
 	struct skw_sdio_data_t *skw_sdio = skw_sdio_get_data();
-	if (skw_sdio->gpio_in < 0 || skw_sdio->gpio_out < 0) {
-		skw_sdio_info("gpio_in and gpio_out no config\n");
+	if (!skw_sdio->host_wake || !skw_sdio->chip_wake) {
+		skw_sdio_info("host_wake and chip_wake no config\n");
 		return ret;
 	}
 	if (!cp_detect_sleep_mode) {
 		skw_sdio_err(
-			"GPIOOUT:%d cannot be operated, pls check gpio num or hw connect!!.\n",
-			skw_sdio->gpio_out);
+			"CP does not support the configured wake signals\n");
 		return -1;
 	}
-	if (skw_sdio->gpio_in == skw_sdio->gpio_out) {
+	if (skw_sdio->host_wake == skw_sdio->chip_wake) {
 		skw_sdio_err(
-			"gpio_in :%d and gpio_out:%d can't be the same!!\n",
-			skw_sdio->gpio_in, skw_sdio->gpio_out);
+			"host-wake and chip-wake must be different GPIOs\n");
 		return -1;
 	}
 
@@ -1680,12 +1723,16 @@ int skw_boot_loader(struct seekwave_device *boot_data)
 	struct skw_sdio_data_t *skw_sdio = skw_sdio_get_data();
 #if defined(SKW_BOOT_MEMPOWERON)
 	struct sdio_func *func;
-	skw_sdio->boot_data= boot_data;
-	skw_sdio->gpio_in = skw_sdio->boot_data->gpio_in;
-	skw_sdio->gpio_out = skw_sdio->boot_data->gpio_out;
+#endif
+
+	skw_sdio->boot_data = boot_data;
+	skw_sdio->host_wake = boot_data->host_wake;
+	skw_sdio->chip_wake = boot_data->chip_wake;
+	skw_sdio->enable_gpio = boot_data->enable_gpio;
+#if defined(SKW_BOOT_MEMPOWERON)
 	if(!skw_sdio->boot_data->first_boot_flag ){
 		if(skw_sdio->boot_data->iram_img_data) {
-			if(skw_sdio->boot_data->gpio_in >= 0) {
+			if(skw_sdio->boot_data->host_wake) {
 				skw_sdio_set_dma_type(skw_sdio->boot_data->dma_type_addr,
 						skw_sdio->boot_data->dma_type);
 				skw_sdio_slp_feature_en(skw_sdio->boot_data->slp_disable_addr,
@@ -1696,7 +1743,7 @@ int skw_boot_loader(struct seekwave_device *boot_data)
 				ret = sdio_release_irq(func);
 				sdio_release_host(func);
 				skw_sdio->irq_type = SKW_SDIO_EXTERNAL_IRQ;
-				ret = skw_sdio_host_irq_init(skw_sdio->gpio_in);
+				ret = skw_sdio_host_irq_init();
 				if (ret < 0) {
 					skw_sdio_err("gpio irq init  fail\n");
 					goto FAIL;
@@ -1707,9 +1754,10 @@ int skw_boot_loader(struct seekwave_device *boot_data)
 					skw_sdio_err("cpdebug_boot fail\n");
 					goto FAIL;
 				}
+			}
 		}
-		if(skw_sdio->boot_data->chip_en < 0){
-			skw_sdio_err("chip_en:%d Invalid Pls check HW !!\n", skw_sdio->boot_data->chip_en);
+		if(!skw_sdio->boot_data->enable_gpio){
+			skw_sdio_err("chip-en GPIO is required for power cycling\n");
 			ret = -1;
 			return ret;
 		}
@@ -1763,7 +1811,6 @@ int skw_boot_loader(struct seekwave_device *boot_data)
 		ret=skw_sdio_cp_service_ops(skw_sdio->boot_data->service_ops);
 	}
 #else
-	skw_sdio->boot_data= boot_data;
 	if (skw_sdio->power_off)
 		boot_data->dl_module = RECOVERY_BOOT;
 	/*--------CP RESET RESCAN------------*/
@@ -1777,7 +1824,6 @@ int skw_boot_loader(struct seekwave_device *boot_data)
 				boot_data->chip_id = 0x6160;
 				skw_sdio_info("boot chip id 0x%x\n", boot_data->chip_id);
 			}
-			skw_sdio->chip_en = boot_data->chip_en;
 			if (skw_sdio->boot_data->iram_dl_size&&
 					skw_sdio->boot_data->dram_dl_size){
 				ret=skw_sdio_boot_cp(SKW_FIRST_BOOT);
@@ -1871,10 +1917,10 @@ void reboot_to_change_bt_uart1(char *mode)
 int skw_reset_bus_dev(void)
 {
 	struct skw_sdio_data_t *skw_sdio = skw_sdio_get_data();
-	if (skw_sdio->chip_en) {
+	if (skw_sdio->enable_gpio) {
 		skw_chip_power_reset();
 	} else {
-		skw_sdio_err("the chip_en is NULL\n");
+		skw_sdio_err("the enable_gpio is NULL\n");
 		skw_sdio_reg_reset_cp();
 	}
 	return 0;
@@ -1883,7 +1929,7 @@ static int skw_sdio_reg_reset_cp(void)
 {
 	struct skw_sdio_data_t *skw_sdio = skw_sdio_get_data();
 	int ret = 0;
-	if (skw_sdio->chip_en >= 0)
+	if (skw_sdio->enable_gpio)
 		return ret;
 	/*reset CP register set value:0x4010001C 0x20:CP sys hif reset*/
 	if (!strncmp((char *)skw_sdio->chip_id, "SV6160LITE", 10) ||
@@ -1990,14 +2036,14 @@ static int skw_sdio_cpdebug_boot(void)
 			skw_sdio->boot_data->dma_type);
 	skw_sdio_slp_feature_en(skw_sdio->boot_data->slp_disable_addr,
 			skw_sdio->boot_data->slp_disable);
-	if(skw_sdio->gpio_in >=0) {
+	if(skw_sdio->host_wake) {
 		func = skw_sdio->sdio_func[FUNC_1];
 		sdio_claim_host(func);
 		try_to_wakeup_modem(max_ch_num);
 		ret = sdio_release_irq(func);
 		sdio_release_host(func);
 		skw_sdio->irq_type = SKW_SDIO_EXTERNAL_IRQ;
-		ret = skw_sdio_host_irq_init(skw_sdio->gpio_in);
+		ret = skw_sdio_host_irq_init();
 	}
 	skw_sdio_info(" CP DUEBGBOOT Done!!!\n");
 	return ret;
@@ -2221,36 +2267,36 @@ int skw_sdio_dloader(int service_index)
             skw_recovery_mode();
 		break;
 		case SKW_WIFI:
-			if(skw_sdio->gpio_in  >= 0&&skw_sdio->gpio_out >= 0){
+			if(skw_sdio->host_wake&&skw_sdio->chip_wake){
 				skw_sdio_slp_feature_en(skw_sdio->boot_data->slp_disable_addr,1);
 				send_cp_wakeup_signal(skw_sdio);
 				skw_sdio->boot_data->skw_dloader_module(SKW_WIFI);
 				skw_sdio_slp_feature_en(skw_sdio->boot_data->slp_disable_addr,0);
 				send_cp_wakeup_signal(skw_sdio);
 			}else{
-				skw_sdio_warn("the gpio_in=%d gpio_out=%d is not set\n",skw_sdio->gpio_in,skw_sdio->gpio_out);
+				skw_sdio_warn("host-wake or chip-wake GPIO is not configured\n");
 			}
 		break;
 		case SKW_BT:
-			if(skw_sdio->gpio_in  >= 0&&skw_sdio->gpio_out >= 0){
+			if(skw_sdio->host_wake&&skw_sdio->chip_wake){
 				skw_sdio_slp_feature_en(skw_sdio->boot_data->slp_disable_addr,1);
 				send_cp_wakeup_signal(skw_sdio);
 				skw_sdio->boot_data->skw_dloader_module(SKW_BT);
 				skw_sdio_slp_feature_en(skw_sdio->boot_data->slp_disable_addr,0);
 				send_cp_wakeup_signal(skw_sdio);
 			}else{
-				skw_sdio_warn("the gpio_in=%d gpio_out=%d is not set\n",skw_sdio->gpio_in,skw_sdio->gpio_out);
+				skw_sdio_warn("host-wake or chip-wake GPIO is not configured\n");
 			}
 		break;
 		case SKW_ALL:
-			if(skw_sdio->gpio_in  >= 0&&skw_sdio->gpio_out >= 0){
+			if(skw_sdio->host_wake&&skw_sdio->chip_wake){
 				skw_sdio_slp_feature_en(skw_sdio->boot_data->slp_disable_addr,1);
 				send_cp_wakeup_signal(skw_sdio);
 				skw_sdio->boot_data->skw_dloader_module(SKW_ALL);
 				skw_sdio_slp_feature_en(skw_sdio->boot_data->slp_disable_addr,0);
 				send_cp_wakeup_signal(skw_sdio);
 			}else{
-				skw_sdio_warn("the gpio_in=%d gpio_out=%d is not set\n",skw_sdio->gpio_in,skw_sdio->gpio_out);
+				skw_sdio_warn("host-wake or chip-wake GPIO is not configured\n");
 			}
 		break;
 		default:
@@ -2541,50 +2587,12 @@ void skw_get_sdio_config(char *buffer, int size)
 
 	ret += sprintf(&buffer[ret], "max_ch_num:\t%u\n", max_ch_num);
 
-	if(g_chipen_pin>=0){
-		switch (gpio_get_value(g_chipen_pin)) {
-		case 0:
-			str = "low";
-			break;
-		case 1:
-			str = "high";
-			break;
-		default:
-			str = "invalid";
-			break;
-		}
-	}
-	ret += sprintf(&buffer[ret], "chipen gpio_out:\t%u (%s)\n", g_chipen_pin, str);
-
-	if(skw_sdio->gpio_out>=0){
-		switch (gpio_get_value(skw_sdio->gpio_out)) {
-		case 0:
-			str = "low";
-			break;
-		case 1:
-			str = "high";
-			break;
-		default:
-			str = "invalid";
-			break;
-		}
-	}
-	ret += sprintf(&buffer[ret], "ap2cp gpio_out:\t%u (%s)\n", skw_sdio->gpio_out, str);
-
-	if(skw_sdio->gpio_in>=0){
-		switch (gpio_get_value(skw_sdio->gpio_in)) {
-		case 0:
-			str = "low";
-			break;
-		case 1:
-			str = "high";
-			break;
-		default:
-			str = "invalid";
-			break;
-		}
-	}
-	ret += sprintf(&buffer[ret], "cp2ap gpio_in:\t%u (%s)\n", skw_sdio->gpio_in, str);
+	ret += sprintf(&buffer[ret], "chip-en:\t%s\n",
+		       skw_gpio_state(skw_sdio->enable_gpio));
+	ret += sprintf(&buffer[ret], "chip-wake:\t%s\n",
+		       skw_gpio_state(skw_sdio->chip_wake));
+	ret += sprintf(&buffer[ret], "host-wake:\t%s\n",
+		       skw_gpio_state(skw_sdio->host_wake));
 
 #if defined(CONFIG_NO_SERVICE_PD) && (CONFIG_NO_SERVICE_PD == 1)
     str = "Enable";
@@ -2698,6 +2706,7 @@ static int __init skw_sdio_io_init(void)
 	skw_sdio->next_size_buf = kzalloc(SKW_BUF_SIZE, GFP_KERNEL);
 	if(skw_sdio->next_size_buf == NULL){
 		kfree(skw_sdio);
+		g_skw_sdio_data = NULL;
 		skw_sdio = NULL;
 		return -ENOMEM;
 	}
@@ -2706,6 +2715,7 @@ static int __init skw_sdio_io_init(void)
 		kfree(skw_sdio->next_size_buf);
 		skw_sdio->next_size_buf = NULL;
 		kfree(skw_sdio);
+		g_skw_sdio_data = NULL;
 		skw_sdio = NULL;
 		return -ENOMEM;
 	}
@@ -2721,6 +2731,7 @@ static int __init skw_sdio_io_init(void)
 		kfree(skw_sdio->eof_buf);
 		skw_sdio->eof_buf = NULL;
 		kfree(skw_sdio);
+		g_skw_sdio_data = NULL;
 		skw_sdio = NULL;
 		skw_sdio_err("kzalloc the log_data fail\n");
 		return -ENOMEM;
@@ -2738,6 +2749,7 @@ static int __init skw_sdio_io_init(void)
 		kfree(skw_sdio->eof_buf);
 		skw_sdio->eof_buf = NULL;
 		kfree(skw_sdio);
+		g_skw_sdio_data = NULL;
 		skw_sdio = NULL;
 		return ret;
 	}
@@ -2751,19 +2763,15 @@ static void __exit  skw_sdio_io_exit(void)
 {
 	struct skw_sdio_data_t *skw_sdio = skw_sdio_get_data();
 
-	if (skw_sdio->sdio_dev_host)
-		seekwave_boot_exit();
 	skw_sdio_debugfs_deinit();
 	if (skw_sdio) {
 		skw_sdio_stop_thread();
-		if (!skw_sdio->suspend_wake_unlock_enable) {
-			skw_sdio_unlock_rx_ws(skw_sdio);
-		}
-		if (skw_sdio->sdio_dev_host)
+		if (skw_sdio->sdio_func[FUNC_1])
 			skw_sdio_reset_card();
 
 		skw_sdio_remove_card();
 		cancel_delayed_work_sync(&skw_sdio->skw_except_work);
+		seekwave_boot_exit();
 		mutex_destroy(&skw_sdio->transfer_mutex);
 		mutex_destroy(&skw_sdio->except_mutex);
 		mutex_destroy(&dloader_mutex);
@@ -2776,6 +2784,7 @@ static void __exit  skw_sdio_io_exit(void)
 		kfree(skw_sdio->log_data);
 		skw_sdio->log_data = NULL;
 		kfree(skw_sdio);
+		g_skw_sdio_data = NULL;
 		skw_sdio = NULL;
 	}
 	skw_sdio_info(" OK\n");

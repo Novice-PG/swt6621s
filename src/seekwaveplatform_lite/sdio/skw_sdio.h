@@ -13,6 +13,7 @@
 #ifndef __SKW_SDIO_H__
 #define __SKW_SDIO_H__
 
+#include <linux/gpio/consumer.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/scatterlist.h>
@@ -135,6 +136,18 @@
 #define	SDIO2_BSP_UPDATE_PORT	11
 #define	SDIO2_MAX_CH_NUM	12
 
+static inline const char *skw_gpio_state(struct gpio_desc *desc)
+{
+	int value;
+
+	if (!desc)
+		return "not configured";
+	value = gpiod_get_value(desc);
+	if (value < 0)
+		return "read error";
+	return value ? "asserted" : "deasserted";
+}
+
 struct skw_sdio_data_t {
 	struct task_struct *rx_thread;
 	struct completion rx_completed;
@@ -155,13 +168,13 @@ struct skw_sdio_data_t {
 	bool adma_rx_enable;
 	bool pwrseq;
 	bool blk_size;
-	/* EXTERNAL_IRQ 0, INBAND_IRQ 1. */
+	/* SKW_SDIO_INBAND_IRQ or SKW_SDIO_EXTERNAL_IRQ. */
 	unsigned char irq_type;
 	atomic_t suspending;
-	int gpio_out;
-	int gpio_in;
-	unsigned int irq_num;
-	unsigned int irq_trigger_type;
+	struct gpio_desc *chip_wake;
+	struct gpio_desc *host_wake;
+	int irq_num;
+	bool irq_wake_enabled;
 	struct sdio_func *sdio_func[MAX_FUNC_NUM];
 	struct mmc_host *sdio_dev_host;
 	unsigned char *eof_buf;
@@ -180,7 +193,7 @@ struct skw_sdio_data_t {
 	char tx_req_map;
 	int resume_com;
 	int cp_state;
-	int chip_en;
+	struct gpio_desc *enable_gpio;
 	unsigned int chip_id[SKW_CHIP_ID_LENGTH];
 	struct seekwave_device *boot_data;
 	struct skw_log_data_t *log_data;
@@ -294,7 +307,7 @@ void send_host_suspend_indication(struct skw_sdio_data_t *skw_sdio);
 void send_host_resume_indication(struct skw_sdio_data_t *skw_sdio);
 int try_to_wakeup_modem(int portno);
 int wakeup_modem(int portno);
-void host_gpio_in_routine(int value);
+void skw_host_wake_changed(int value);
 void skw_sdio_inband_irq_handler(struct sdio_func *func);
 void modem_notify_event(int event);
 int loopcheck_send_data(char *buffer, int size);

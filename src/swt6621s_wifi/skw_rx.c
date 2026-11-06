@@ -976,7 +976,7 @@ static void skw_reorder_release(struct skw_reorder_rx *reorder,
 {
 	bool release = true;
 
-	u16 i, index;
+	u16 i, index, sn;
 	u16 win_start;
 	struct sk_buff *skb;
 	struct sk_buff_head *list;
@@ -996,7 +996,8 @@ static void skw_reorder_release(struct skw_reorder_rx *reorder,
 			break;
 		}
 
-		index = (win_start + i) % tid_rx->win_size;
+		sn = ieee80211_sn_add(win_start, i);
+		index = sn % tid_rx->win_size;
 		list = &tid_rx->reorder_buf[index];
 
 		if (!skb_queue_len(list)) {
@@ -1010,11 +1011,11 @@ static void skw_reorder_release(struct skw_reorder_rx *reorder,
 		/* release timeout skb and reset reorder timer */
 		if (!release) {
 			if (!is_skw_msdu_timeout(reorder->skw, list)) {
-				skw_set_reorder_timer(tid_rx, win_start + i);
+				skw_set_reorder_timer(tid_rx, sn);
 				break;
 			}
 
-			skw_reorder_force_release(tid_rx, win_start + i,
+			skw_reorder_force_release(tid_rx, sn,
 					release_list, SKW_RELEASE_EXPIRED);
 			release = true;
 			continue;
@@ -1045,14 +1046,14 @@ static void skw_reorder_release(struct skw_reorder_rx *reorder,
 
 				trace_skw_rx_reorder_release(reorder->inst,
 						reorder->peer_idx, reorder->tid,
-						win_start, win_start + i,
+						win_start, sn,
 						index, tid_rx->win_start,
 						tid_rx->stored_num);
 
 			} else {
 				/* AMSDU not ready and expired */
 				if (!timer_pending(&reorder->timer))
-					skw_set_reorder_timer(tid_rx, win_start + i);
+					skw_set_reorder_timer(tid_rx, sn);
 
 				break;
 			}

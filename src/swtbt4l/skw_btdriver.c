@@ -48,7 +48,7 @@
 #include "skw_log.h"
 #include "skw_common.h"
 
-#define VERSION "0.1"
+#define VERSION "1.1.0"
 
 
 

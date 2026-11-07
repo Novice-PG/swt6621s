@@ -2642,5 +2642,5 @@ module_param_array_named(mac, skw_mac, byte, NULL, 0444);
 MODULE_PARM_DESC(mac, "config mac address");
 
 MODULE_LICENSE("GPL v2");
-MODULE_VERSION("1.0.0");
+MODULE_VERSION("1.1.0");
 MODULE_AUTHOR("seekwavetech");

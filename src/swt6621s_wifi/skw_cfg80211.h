@@ -75,7 +75,7 @@ struct skw_tcp_keepalive_info {
 struct skw_tcp_keepalive_offload_tlv {
 	u8 resv[3];
 	u8 tcpinfo_num;
-	struct skw_tcp_keepalive_info tcpinfo[0];//tcpinfo[SKW_MAX_TCPKEEP_OFFLOAD_INFO_NUM];
+	struct skw_tcp_keepalive_info tcpinfo[];
 } __packed;
 
 struct skw_tcp_keep_active_offload_set {
@@ -92,7 +92,7 @@ struct skw_suspend_t {
 	 */
 	u16 wow_flags;
 
-	struct skw_tlv tlv[0];
+	struct skw_tlv tlv[];
 } __packed;
 
 
@@ -306,7 +306,7 @@ struct skw_sched_scan_param {
 	u8 n_scan_plans;
 	u32 scan_plans_len;
 	u32 scan_plans_offset;
-	u8 data[0];
+	u8 data[];
 } __packed;
 
 struct skw_center_chn {
@@ -451,7 +451,7 @@ struct skw_startap_param {
 	u16 probe_rsp_ies_len;
 	u16 assoc_rsp_ies_offset;
 	u16 assoc_rsp_ies_len;
-	u8 ies[0];
+	u8 ies[];
 } __packed;
 
 struct skw_startap_resp {
@@ -475,7 +475,7 @@ struct skw_beacon_params {
 	u16 assoc_rsp_ies_len;
 	u16 probe_rsp_offset;
 	u16 probe_rsp_len;
-	u8 ies[0];
+	u8 ies[];
 } __packed;
 
 struct skw_del_sta_param {
@@ -545,7 +545,7 @@ struct skw_mgmt_tx_param {
 	u8 band;
 	u8 dont_wait_for_ack;
 	u16 mgmt_frame_len;
-	struct ieee80211_mgmt mgmt[0];
+	struct ieee80211_mgmt mgmt[];
 } __packed;
 
 struct skw_mgmt_register_param {

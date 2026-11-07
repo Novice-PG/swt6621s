@@ -221,6 +221,8 @@ enum skw_subsys{
 	SKW_ALL,
 };
 
+struct gpio_desc;
+
 struct seekwave_device {
 	struct  platform_device *pdev;
 	char *skw_nv_name;
@@ -289,21 +291,21 @@ struct seekwave_device {
 	int all_dl_count;
 	int bt_dl_count;
 	int wifi_dl_count;
-	int host_gpio;/*GPIO0_A3*/
-	int chip_gpio;/*GPIO2_D2*/
-	int chip_en;/*GPIO0_B1*/
+	struct gpio_desc *host_wake;
+	struct gpio_desc *chip_wake;
+	struct gpio_desc *enable_gpio;
 	int bt_service_state;
 	int wifi_service_state;
 	int service_ops;
 	int dl_done_signal;
-	int gpio_out;//host wakeup gpio0:/*GPIO0_A3*/,chip_wakeup gpio2:/*GPIO2_D2*/
-	int gpio_in;//host wakeup gpio 0
-	int gpio_val;
-	int gpio_next_val;
 
 };
+void skw_boot_abort(void);
 void seekwave_boot_exit(void);
 int seekwave_boot_init(char *chip_id);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+bool skw_boot_is_ready(void);
+#endif
 int skw_ucom_init(void);
 void skw_ucom_exit(void);
 int skw_bind_boot_driver(struct device *dev);

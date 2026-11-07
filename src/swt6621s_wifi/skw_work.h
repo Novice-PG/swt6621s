@@ -50,7 +50,12 @@ struct skw_work_cb {
 
 struct skw_event_work {
 	atomic_t enabled;
-	struct work_struct work;
+	union {
+		struct work_struct work;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+		struct wiphy_work wiphy_work;
+#endif
+	};
 	struct sk_buff_head qlist;
 };
 
@@ -74,9 +79,18 @@ static inline void skw_event_work_init(struct skw_event_work *work,
 	atomic_set(&work->enabled, 1);
 }
 
+static inline void skw_event_work_disable(struct skw_event_work *work)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&work->qlist.lock, flags);
+	atomic_set(&work->enabled, 0);
+	spin_unlock_irqrestore(&work->qlist.lock, flags);
+}
+
 static inline void skw_event_work_deinit(struct skw_event_work *work)
 {
-	atomic_set(&work->enabled, 0);
+	skw_event_work_disable(work);
 	cancel_work_sync(&work->work);
 	skb_queue_purge(&work->qlist);
 }

@@ -38,6 +38,7 @@
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 #include <linux/firmware.h>
+#include <linux/skw_firmware.h>
 #include <linux/notifier.h>
 #include <linux/delay.h>
 #include <linux/version.h>
@@ -47,7 +48,7 @@
 #include "skw_log.h"
 #include "skw_common.h"
 
-#define VERSION "0.1"
+#define VERSION "1.1.0"
 
 
 
@@ -100,6 +101,9 @@ struct btseekwave_data
 
 struct btseekwave_data *skw_data = NULL;
 
+static char *firmware_dir = "";
+module_param(firmware_dir, charp, 0444);
+MODULE_PARM_DESC(firmware_dir, "Firmware subdirectory within the standard firmware search paths");
 
 void btseekwave_hci_hardware_error(struct hci_dev *hdev)
 {
@@ -527,15 +531,18 @@ int btseekwave_download_nv(struct hci_dev *hdev)
 
     if(SKW_CHIPID_6316 == chip_version)
     {
-        err = request_firmware(&fw, NV_FILE_NAME_6316, &hdev->dev);
+        err = skw_firmware_request(&fw, NV_FILE_NAME_6316, &hdev->dev,
+                                   firmware_dir, request_firmware);
     }
     else if(SKW_CHIPID_6160_LITE == chip_version)
     {
-        err = request_firmware(&fw, NV_FILE_NAME_6160_LITE, &hdev->dev);
+        err = skw_firmware_request(&fw, NV_FILE_NAME_6160_LITE, &hdev->dev,
+                                   firmware_dir, request_firmware);
     }
     else
     {
-        err = request_firmware(&fw, NV_FILE_NAME, &hdev->dev);
+        err = skw_firmware_request(&fw, NV_FILE_NAME, &hdev->dev,
+                                   firmware_dir, request_firmware);
     }
     if (err < 0)
     {
@@ -979,6 +986,10 @@ static int btseekwave_probe(struct platform_device *pdev)
     }
 
     SKWBT_INFO("%s pdev name %s\n", __func__, pdata->port_name);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+    if (pdata->service_ready && !pdata->service_ready())
+        return -EPROBE_DEFER;
+#endif
 
     data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
     if (!data)
@@ -1048,7 +1059,7 @@ static int btseekwave_probe(struct platform_device *pdev)
     return 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 static void btseekwave_remove(struct platform_device *pdev)
 #else
 static int btseekwave_remove(struct platform_device *pdev)
@@ -1081,7 +1092,7 @@ static int btseekwave_remove(struct platform_device *pdev)
 
         if (!data)
         {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
             return;
 #else
             return 0;
@@ -1110,7 +1121,7 @@ static int btseekwave_remove(struct platform_device *pdev)
 #endif
     }
     SKWBT_INFO("func %s end", __func__);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
     return;
 #else
     return 0;
@@ -1169,4 +1180,3 @@ module_exit(btseekwave_exit);
 MODULE_DESCRIPTION("Seekwave Bluetooth driver ver " VERSION);
 MODULE_VERSION(VERSION);
 MODULE_LICENSE("GPL");
-

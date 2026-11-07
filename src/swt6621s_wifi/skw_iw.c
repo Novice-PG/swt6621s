@@ -897,6 +897,9 @@ int skw_wow_filter_set(struct net_device *ndev, u8 *param, int len, char *resp, 
 	struct skw_core *skw = iface->skw;
 	char t_rule[SKW_MAX_WOW_USER_RULE_LEN] = {0};
 
+	if (!param || len <= 0 || len >= SKW_IW_WOW_BUF_SIZE)
+		return -EINVAL;
+
 	data = SKW_ZALLOC(SKW_IW_WOW_BUF_SIZE, GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
@@ -964,8 +967,13 @@ int skw_wow_filter_set(struct net_device *ndev, u8 *param, int len, char *resp, 
 
 	//Add wow filter by idx
 	if (!strncmp(hex, "idx=", strlen("idx="))) {
+		/* Keep the complete rule before strsep() inserts terminators. */
+		if (strscpy(t_rule, hex, sizeof(t_rule)) < 0) {
+			ret = -E2BIG;
+			goto free;
+		}
 		ch = strsep(&hex, ",");
-		if ((ch == NULL) || (strlen(ch) == 0)) {
+		if (!ch || !*ch || !hex || !*hex) {
 			skw_err("idx param\n");
 			resp_len = sprintf(resp, "ERROR: %s\n",
 				 "idx param");
@@ -998,10 +1006,6 @@ int skw_wow_filter_set(struct net_device *ndev, u8 *param, int len, char *resp, 
 			ret = -EINVAL;
 			goto free;
 		}
-
-		//Store the temp rule
-		memset(t_rule, 0, SKW_MAX_WOW_USER_RULE_LEN);
-		strncpy(t_rule, param, min_t(int, SKW_MAX_WOW_USER_RULE_LEN, len));
 
 		//Translate the wow filter to skw rules
 		rule = &wow_rules_set.rules[rule_idx];
@@ -1149,7 +1153,8 @@ int skw_wow_filter_set(struct net_device *ndev, u8 *param, int len, char *resp, 
 		//Store the rule
 		wow_user_rules.en_bitmap |=  (1ULL << rule_idx);
 		memset(wow_user_rules.rules[rule_idx], 0, SKW_MAX_WOW_USER_RULE_LEN);
-		strncpy(wow_user_rules.rules[rule_idx], t_rule, SKW_MAX_WOW_USER_RULE_LEN);
+		strscpy(wow_user_rules.rules[rule_idx], t_rule,
+			sizeof(wow_user_rules.rules[rule_idx]));
 
 		ret = 0;
 
@@ -1917,14 +1922,38 @@ static int skw_iwpriv_get_bandcfg(struct skw_iface *iface, void *param,
 	return 0;
 }
 
+/* Parse a field in the writable command buffer, preserving its delimiter. */
+static int skw_iwpriv_parse_field(char *text, size_t len, unsigned int base,
+				long long *value)
+{
+	char saved;
+	int ret;
+
+	if (!text || !len)
+		return -EINVAL;
+	saved = text[len];
+	text[len] = '\0';
+	ret = kstrtoll(text, base, value);
+	text[len] = saved;
+	return ret;
+}
+
+static int skw_iwpriv_parse_number(char *text, long long *value)
+{
+	if (!text)
+		return -EINVAL;
+	return skw_iwpriv_parse_field(text, strcspn(text, ","), 10, value);
+}
+
 static int skw_iwpriv_set_max_ppdu_dur(struct skw_iface *iface, void *param,
 	char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	char *p = NULL;
 	struct skw_max_ppdu_dur max_ppdu_dur = {0};
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
 	skw_dbg("args: %s\n", args);
@@ -1935,14 +1964,14 @@ static int skw_iwpriv_set_max_ppdu_dur(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	skw_dbg("idx found %s\n", p - 1);
+	skw_dbg("idx found %s\n", args);
 
-	max_ppdu_dur.idx = skw_simple_strtol(p - 1, NULL, 10);
-	if (max_ppdu_dur.idx < 0 || max_ppdu_dur.idx > 5) {
-		skw_err("idx out of range\n");
-		return -EINVAL;
-	}
-
+	ret = skw_iwpriv_parse_number(args, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 5)
+		return -ERANGE;
+	max_ppdu_dur.idx = parsed;
 	p = p + strlen(",");
 	if (!p) {
 		skw_err("mppdu dur not found\n");
@@ -1950,19 +1979,23 @@ static int skw_iwpriv_set_max_ppdu_dur(struct skw_iface *iface, void *param,
 	}
 
 	skw_dbg("mppdu dur found %s\n", p);
-	max_ppdu_dur.max_ppdu_dur = skw_simple_strtol(p, NULL, 10);
+	ret = skw_iwpriv_parse_number(p, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
 	switch (max_ppdu_dur.idx) {
 	case 0:
-		if (max_ppdu_dur.max_ppdu_dur > 0xFFFF) {
-			max_ppdu_dur.max_ppdu_dur = 0xFFFF;
+		if (parsed > 0xFFFF) {
+			parsed = 0xFFFF;
 			skw_warn("The max ppdu dur of idx 0 is 0xFFFF\n");
 		}
 
 		break;
 
 	case 1:
-		if (max_ppdu_dur.max_ppdu_dur > 0x7FFF) {
-			max_ppdu_dur.max_ppdu_dur = 0x7FFF;
+		if (parsed > 0x7FFF) {
+			parsed = 0x7FFF;
 			skw_warn("The max ppdu dur of idx 1 is 0x7FFF\n");
 		}
 
@@ -1972,8 +2005,8 @@ static int skw_iwpriv_set_max_ppdu_dur(struct skw_iface *iface, void *param,
 	case 3:
 	case 4:
 	case 5:
-		if (max_ppdu_dur.max_ppdu_dur > 0x1FFF) {
-			max_ppdu_dur.max_ppdu_dur = 0x1FFF;
+		if (parsed > 0x1FFF) {
+			parsed = 0x1FFF;
 			skw_warn("The max ppdu dur of idx 1 is 0x1FFF\n");
 		}
 
@@ -1982,6 +2015,8 @@ static int skw_iwpriv_set_max_ppdu_dur(struct skw_iface *iface, void *param,
 	default:
 		break;
 	}
+
+	max_ppdu_dur.max_ppdu_dur = parsed;
 
 	skw_dbg("max ppdu dur idx %d, dur %d\n", max_ppdu_dur.idx, max_ppdu_dur.max_ppdu_dur);
 
@@ -1995,97 +2030,26 @@ static int skw_iwpriv_set_max_ppdu_dur(struct skw_iface *iface, void *param,
 	return ret;
 }
 
-static u16 skw_iwpriv_convert_string_to_u (char *ptr, u8 length)
-{
-	char *buffer = NULL;
-	unsigned long num = 0;
-	int ret = 0;
-
-	buffer = kmalloc(length + 1, GFP_KERNEL);
-	if (!buffer) {
-		skw_err("mem alloc failed\n");
-		return -ENOMEM;
-	}
-	memcpy(buffer, ptr, length);
-	buffer[length] = '\0';
-
-	ret = kstrtoul(buffer, 0, &num);
-	if (ret == 0) {
-		if (num <= 0xFFFF) {
-			kfree(buffer);
-			return (u16)num;
-		} else if (num <= 0xFF) {
-			kfree(buffer);
-			return (u8)num;
-		} else {
-			skw_err("tred beyond u8 and u16\n");
-			kfree(buffer);
-			return -ERANGE;
-		}
-	} else {
-		skw_err("transfer fail\n");
-		kfree(buffer);
-		return -EINVAL;
-	}
-}
-
-static u32 skw_iwpriv_convert_string_to_u32(char *ptr, unsigned int length)
-{
-	if (ptr == NULL || length <= 0) {
-		skw_err("Invalid input parameters");
-		return -EINVAL;
-	}
-
-	if (length >= 2 && ptr[0] == '0' && (ptr[1] == 'x' || ptr[1] == 'X')) {
-		char *buffer = NULL;
-		unsigned long num = 0;
-		int ret = 0;
-
-		buffer = kmalloc(length + 1, GFP_KERNEL);
-		if (!buffer) {
-			skw_err("mem alloc failed\n");
-			return -ENOMEM;
-		}
-		memcpy(buffer, ptr, length);
-		buffer[length] = '\0';
-
-		ret = kstrtoul(buffer, 16, &num);
-		if (ret == 0) {
-			if (num <= 0xFFFFFFFF) {
-				kfree(buffer);
-				return (u32)num;
-			} else {
-				skw_err("value exceeds u32 range");
-				kfree(buffer);
-				return -ERANGE;
-			}
-		} else {
-			skw_err("hex conversion failed");
-			kfree(buffer);
-			return -EINVAL;
-		}
-	} else {
-		skw_err("not a valid hex string");
-		return -EINVAL;
-	}
-}
-
 int skw_iwpriv_set_edca_params(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	char *p = NULL, *q = NULL;
 	struct skw_edca_param_s edca_params = {0};
-	u8 parmas_len = 0;
+	size_t params_len;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
 	skw_dbg("args: %s\n", args);
 
-	parmas_len = strlen(args);
-	if (parmas_len == 1) {
-		ret = skw_simple_strtol(args, NULL, 10);
+	params_len = strlen(args);
+	if (params_len == 1) {
+		ret = skw_iwpriv_parse_number(args, &parsed);
+		if (ret)
+			return ret;
+		ret = parsed;
 		if (!ret) {
 			skw_dbg(" not set edca params\n");
 			edca_params.enable = 0;
@@ -2095,21 +2059,21 @@ int skw_iwpriv_set_edca_params(struct skw_iface *iface, void *param,
 		skw_err(" need more edca params\n");
 		goto SETFAIL;
 
-	} else if (parmas_len > 1) {
+	} else if (params_len > 1) {
 		p = strchr(args, ',');
 		if (!p) {
 			skw_dbg("flag not found\n");
 			return -ENOTSUPP;
 		}
 
-		skw_dbg("params found %s\n", p - 1);
+		skw_dbg("params found %s\n", args);
 
-		edca_params.enable = skw_simple_strtol(p - 1, NULL, 10);
-		if (edca_params.enable != 0 && edca_params.enable != 1) {
-			skw_err("flag error %d\n", edca_params.enable);
-			return -EINVAL;
-		}
-
+		ret = skw_iwpriv_parse_number(args, &parsed);
+		if (ret)
+			return ret;
+		if (parsed < 0 || parsed > 1)
+			return -ERANGE;
+		edca_params.enable = parsed;
 		if (edca_params.enable == 0) {
 			skw_err("not set edca params\n");
 			goto SETPARA;
@@ -2120,23 +2084,21 @@ int skw_iwpriv_set_edca_params(struct skw_iface *iface, void *param,
 
 	/* parse AC_BE parametes */
 	/** AciAifn **/
-	//p = p + strlen(",");
 	q = strchr(p + 1, ',');
 	if (!p || !q) {
 		skw_err("AC_BE AciAifn not found\n");
 		return -ENOTSUPP;
 	}
 
-	//edca_params.ac_best_effort.aci_aifn = skw_simple_strtol(p, NULL, 10);
-	edca_params.ac_best_effort.aci_aifn = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
-	if (edca_params.ac_best_effort.aci_aifn > 0xFF) {
-		skw_warn("AC_BE AciAifn limit is 0xFF\n");
-		edca_params.ac_best_effort.aci_aifn = 0xFF;
-	}
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
+	edca_params.ac_best_effort.aci_aifn = min_t(long long, parsed, 0xff);
 
 	skw_dbg("AC_BE Set AciAifn %d\n", edca_params.ac_best_effort.aci_aifn);
 
-	//return 0;
 	/** EcWminEcWmax **/
 	p = q;
 	q = strchr(p + 1, ',');
@@ -2145,12 +2107,12 @@ int skw_iwpriv_set_edca_params(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	//edca_params.ac_best_effort.ec_wmin_wmax = skw_simple_strtol(p, NULL, 10);
-	edca_params.ac_best_effort.ec_wmin_wmax = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
-	if (edca_params.ac_best_effort.ec_wmin_wmax > 0xFF) {
-		skw_dbg("AC_BE EcWminEcWmax limit is 0xFF\n");
-		edca_params.ac_best_effort.ec_wmin_wmax = 0xFF;
-	}
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
+	edca_params.ac_best_effort.ec_wmin_wmax = min_t(long long, parsed, 0xff);
 
 	skw_dbg("AC_BE Set EcWminEcWmax %d\n", edca_params.ac_best_effort.ec_wmin_wmax);
 
@@ -2162,12 +2124,12 @@ int skw_iwpriv_set_edca_params(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	//edca_params.ac_best_effort.txop_limit = skw_simple_strtol(p, NULL, 10);
-	edca_params.ac_best_effort.txop_limit = skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
-	if (edca_params.ac_best_effort.txop_limit > 0xFFFF) {
-		skw_dbg("AC_BE TxopLimit limit is 0xFF\n");
-		edca_params.ac_best_effort.txop_limit = 0xFFFF;
-	}
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
+	edca_params.ac_best_effort.txop_limit = min_t(long long, parsed, 0xffff);
 
 	skw_dbg("AC_BE Set TxopLimit %d\n", edca_params.ac_best_effort.txop_limit);
 
@@ -2180,12 +2142,12 @@ int skw_iwpriv_set_edca_params(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	//edca_params.ac_background.aci_aifn = skw_simple_strtol(p, NULL, 10);
-	edca_params.ac_background.aci_aifn = skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
-	if (edca_params.ac_background.aci_aifn > 0xFF) {
-		skw_warn("AC_BG AciAifn limit is 0xFF\n");
-		edca_params.ac_background.aci_aifn = 0xFF;
-	}
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
+	edca_params.ac_background.aci_aifn = min_t(long long, parsed, 0xff);
 
 	skw_dbg("AC_BG Set AciAifn %d\n", edca_params.ac_background.aci_aifn);
 
@@ -2197,12 +2159,12 @@ int skw_iwpriv_set_edca_params(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	//edca_params.ac_background.ec_wmin_wmax = skw_simple_strtol(p, NULL, 10);
-	edca_params.ac_background.ec_wmin_wmax = skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
-	if (edca_params.ac_background.ec_wmin_wmax > 0xFF) {
-		skw_warn("AC_BG EcWminEcWmax limit is 0xFF\n");
-		edca_params.ac_background.ec_wmin_wmax = 0xFF;
-	}
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
+	edca_params.ac_background.ec_wmin_wmax = min_t(long long, parsed, 0xff);
 
 	skw_dbg("AC_BG Set EcWminEcWmax %d\n", edca_params.ac_background.ec_wmin_wmax);
 
@@ -2214,12 +2176,12 @@ int skw_iwpriv_set_edca_params(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	//edca_params.ac_best_effort.txop_limit = skw_simple_strtol(p, NULL, 10);
-	edca_params.ac_background.txop_limit = skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
-	if (edca_params.ac_background.txop_limit > 0xFFFF) {
-		skw_warn("AC_BG TxopLimit limit is 0xFF\n");
-		edca_params.ac_background.txop_limit = 0xFFFF;
-	}
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
+	edca_params.ac_background.txop_limit = min_t(long long, parsed, 0xffff);
 
 	skw_dbg("AC_BG Set TxopLimit %d\n", edca_params.ac_best_effort.txop_limit);
 
@@ -2232,11 +2194,12 @@ int skw_iwpriv_set_edca_params(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	edca_params.ac_video.aci_aifn = skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
-	if (edca_params.ac_video.aci_aifn > 0xFF) {
-		skw_warn("AC_VIDEO AciAifn limit is 0xFF\n");
-		edca_params.ac_video.aci_aifn = 0xFF;
-	}
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
+	edca_params.ac_video.aci_aifn = min_t(long long, parsed, 0xff);
 
 	skw_dbg("AC_VIDEO Set AciAifn %d\n", edca_params.ac_video.aci_aifn);
 
@@ -2248,11 +2211,12 @@ int skw_iwpriv_set_edca_params(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	edca_params.ac_video.ec_wmin_wmax = skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
-	if (edca_params.ac_video.ec_wmin_wmax > 0xFF) {
-		skw_warn("AC_VIDEO EcWminEcWmax limit is 0xFF\n");
-		edca_params.ac_video.ec_wmin_wmax = 0xFF;
-	}
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
+	edca_params.ac_video.ec_wmin_wmax = min_t(long long, parsed, 0xff);
 
 	skw_dbg("AC_VIDEO Set EcWminEcWmax %d\n", edca_params.ac_video.ec_wmin_wmax);
 
@@ -2264,11 +2228,12 @@ int skw_iwpriv_set_edca_params(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	edca_params.ac_video.txop_limit = skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
-	if (edca_params.ac_video.txop_limit > 0xFFFF) {
-		skw_warn("AC_VIDEO TxopLimit limit is 0xFF\n");
-		edca_params.ac_video.txop_limit = 0xFFFF;
-	}
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
+	edca_params.ac_video.txop_limit = min_t(long long, parsed, 0xffff);
 
 	skw_dbg("AC_VIDEO Set TxopLimit %d\n", edca_params.ac_video.txop_limit);
 
@@ -2281,11 +2246,12 @@ int skw_iwpriv_set_edca_params(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	edca_params.ac_voice.aci_aifn = skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
-	if (edca_params.ac_voice.aci_aifn > 0xFF) {
-		skw_warn("AC_VOICE AciAifn limit is 0xFF\n");
-		edca_params.ac_voice.aci_aifn = 0xFF;
-	}
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
+	edca_params.ac_voice.aci_aifn = min_t(long long, parsed, 0xff);
 
 	skw_dbg("AC_VOICE Set AciAifn %d\n", edca_params.ac_voice.aci_aifn);
 
@@ -2297,11 +2263,12 @@ int skw_iwpriv_set_edca_params(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	edca_params.ac_voice.ec_wmin_wmax = skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
-	if (edca_params.ac_voice.ec_wmin_wmax > 0xFF) {
-		skw_warn("AC_VOICE EcWminEcWmax limit is 0xFF\n");
-		edca_params.ac_voice.ec_wmin_wmax = 0xFF;
-	}
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
+	edca_params.ac_voice.ec_wmin_wmax = min_t(long long, parsed, 0xff);
 
 	skw_dbg("AC_VOICE Set EcWminEcWmax %d\n", edca_params.ac_voice.ec_wmin_wmax);
 
@@ -2313,11 +2280,12 @@ int skw_iwpriv_set_edca_params(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	edca_params.ac_voice.txop_limit = skw_simple_strtol(p + 1, NULL, 10);
-	if (edca_params.ac_voice.txop_limit > 0xFFFF) {
-		skw_warn("AC_VOICE TxopLimit limit is 0xFF\n");
-		edca_params.ac_voice.txop_limit = 0xFFFF;
-	}
+	ret = skw_iwpriv_parse_number(p + 1, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
+	edca_params.ac_voice.txop_limit = min_t(long long, parsed, 0xffff);
 
 	skw_dbg("AC_VOICE Set TxopLimit %d\n", edca_params.ac_voice.txop_limit);
 
@@ -2341,39 +2309,29 @@ SETFAIL:
 static int skw_iwpriv_set_cca_thre_nowifi(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	char *p = NULL;
 	struct skw_cca_thre_nowifi nowifi = {0};
-	int temp_val = 0;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
 	skw_dbg("args: %s\n", args);
 
 	p = args;
-	if (!p) {
-		skw_err("nowifi not found\n");
-		return -ENOTSUPP;
-	} else {
-		skw_err("nowifi found %s\n", p);
-		temp_val = skw_simple_strtol(p, NULL, 10);
-		if (temp_val >= 0 || temp_val < -255) {
-			skw_warn("The max CCA Thre NOWIFI is 0xFF\n");
-			return -EINVAL;
-		}
-		nowifi.val = 0 - temp_val;
-	}
 
 	skw_dbg("nowifi found %s\n", p);
 
-	temp_val = skw_simple_strtol(p, NULL, 10);
-	if (temp_val >= 0 || temp_val < -255) {
+	ret = skw_iwpriv_parse_number(p, &parsed);
+	if (ret)
+		return ret;
+	if (parsed >= 0 || parsed < -255) {
 		skw_warn("The max CCA Thre NOWIFI is 0xFF\n");
 		return -EINVAL;
 	}
 
-	nowifi.val = 0 - temp_val;
+	nowifi.val = 0 - parsed;
 
 	skw_dbg("Set CCA Thre NOWIFI %d\n", nowifi.val);
 
@@ -2391,39 +2349,29 @@ static int skw_iwpriv_set_cca_thre_nowifi(struct skw_iface *iface, void *param,
 static int skw_iwpriv_set_cca_thre_11b(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	char *p = NULL;
 	struct skw_cca_thre_11b cca_11b = {0};
-	int temp_val = 0;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
 	skw_dbg("args: %s\n", args);
 
 	p = args;
-	if (!p) {
-		skw_err("11b not found\n");
-		return -ENOTSUPP;
-	} else {
-		skw_err("11b found %s\n", p);
-		temp_val = skw_simple_strtol(p, NULL, 10);
-		if (temp_val >= 0 || temp_val < -255) {
-			skw_warn("The max CCA Thre 11b is 0xFF\n");
-			return -EINVAL;
-		}
-		cca_11b.val = 0 - temp_val;
-	}
 
 	skw_dbg("11b found %s\n", p);
 
-	temp_val = skw_simple_strtol(p, NULL, 10);
-	if (temp_val >= 0 || temp_val < -255) {
+	ret = skw_iwpriv_parse_number(p, &parsed);
+	if (ret)
+		return ret;
+	if (parsed >= 0 || parsed < -255) {
 		skw_warn("The max CCA Thre 11b is 0xFF\n");
 		return -EINVAL;
 	}
 
-	cca_11b.val = 0 - temp_val;
+	cca_11b.val = 0 - parsed;
 
 	skw_dbg("Set CCA Thre 11b %d\n", cca_11b.val);
 
@@ -2440,39 +2388,29 @@ static int skw_iwpriv_set_cca_thre_11b(struct skw_iface *iface, void *param,
 static int skw_iwpriv_set_cca_thre_ofdm(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	char *p = NULL;
 	struct skw_cca_thre_ofdm ofdm = {0};
-	int temp_val = 0;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
 	skw_dbg("args: %s\n", args);
 
 	p = args;
-	if (!p) {
-		skw_err("ofdm not found\n");
-		return -ENOTSUPP;
-	} else {
-		skw_err("ofdm found %s\n", p);
-		temp_val = skw_simple_strtol(p, NULL, 10);
-		if (temp_val >= 0 || temp_val < -255) {
-			skw_warn("The max CCA Thre ofdm is 0xFF\n");
-			return -EINVAL;
-		}
-		ofdm.val = 0 - temp_val;
-	}
 
 	skw_dbg("ofdm found %s\n", p);
 
-	temp_val = skw_simple_strtol(p, NULL, 10);
-	if (temp_val >= 0 || temp_val < -255) {
+	ret = skw_iwpriv_parse_number(p, &parsed);
+	if (ret)
+		return ret;
+	if (parsed >= 0 || parsed < -255) {
 		skw_warn("The max CCA Thre ofdm is 0xFF\n");
 		return -EINVAL;
 	}
 
-	ofdm.val = 0 - temp_val;
+	ofdm.val = 0 - parsed;
 
 	skw_dbg("Set CCA Thre OFDM %d\n", ofdm.val);
 
@@ -2583,20 +2521,25 @@ static int skw_is_value_in_enum(u8 value)
 static int skw_iwpriv_set_force_rts_rate(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	char *p = NULL, *q = NULL;
 	struct skw_force_rts_rate rts_rate = {0};
-	u8 parmas_len = 0, val = 0;
+	size_t params_len;
+	u8 val = 0;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
 	skw_dbg("args: %s\n", args);
 
 	/* parse rts rate flag */
-	parmas_len = strlen(args);
-	if (parmas_len == 1) {
-		ret = skw_simple_strtol(args, NULL, 10);
+	params_len = strlen(args);
+	if (params_len == 1) {
+		ret = skw_iwpriv_parse_number(args, &parsed);
+		if (ret)
+			return ret;
+		ret = parsed;
 		if (!ret) {
 			skw_warn(" not force set rts rate\n");
 			rts_rate.enable = 0;
@@ -2606,21 +2549,21 @@ static int skw_iwpriv_set_force_rts_rate(struct skw_iface *iface, void *param,
 		skw_warn(" need more rate params\n");
 		goto SETFAIL;
 
-	} else if (parmas_len > 1) {
+	} else if (params_len > 1) {
 		p = strchr(args, ',');
 		if (!p) {
 			skw_err("flag not found\n");
 			return -ENOTSUPP;
 		}
 
-		skw_dbg("params found %s\n", p - 1);
+		skw_dbg("params found %s\n", args);
 
-		rts_rate.enable = skw_simple_strtol(p - 1, NULL, 10);
-		if (rts_rate.enable != 0 && rts_rate.enable != 1) {
-			skw_err("flag error %d\n", rts_rate.enable);
-			return -EINVAL;
-		}
-
+		ret = skw_iwpriv_parse_number(args, &parsed);
+		if (ret)
+			return ret;
+		if (parsed < 0 || parsed > 1)
+			return -ERANGE;
+		rts_rate.enable = parsed;
 		if (rts_rate.enable == 0) {
 			skw_err("not set rts_rate params\n");
 			goto SETPARA;
@@ -2635,7 +2578,12 @@ static int skw_iwpriv_set_force_rts_rate(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	val = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	val = parsed;
 	if (!skw_is_value_in_enum(val)) {
 		skw_warn("invalid 2.4G rate %d\n", val);
 		return -EINVAL;
@@ -2652,7 +2600,12 @@ static int skw_iwpriv_set_force_rts_rate(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	val = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
+	ret = skw_iwpriv_parse_field(p + 1, q ? q - p - 1 : strlen(p + 1), 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	val = parsed;
 	if (!skw_is_value_in_enum(val)) {
 		skw_warn("invalid 5G rate %d\n", val);
 		return -EINVAL;
@@ -2680,20 +2633,25 @@ SETFAIL:
 static int skw_iwpriv_set_force_rx_rsp_rate(struct skw_iface *iface, void *param,
 	char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	char *p = NULL, *q = NULL;
 	struct skw_force_rx_rsp_rate rate = {0};
-	u8 parmas_len = 0, val = 0;
+	size_t params_len;
+	u8 val = 0;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
 	skw_dbg("skw_iwpriv_set_force_rts_rate args %s\n", args);
 
 	/* parse rts rate flag */
-	parmas_len = strlen(args);
-	if (parmas_len == 1) {
-		ret = skw_simple_strtol(args, NULL, 10);
+	params_len = strlen(args);
+	if (params_len == 1) {
+		ret = skw_iwpriv_parse_number(args, &parsed);
+		if (ret)
+			return ret;
+		ret = parsed;
 		if (!ret) {
 			skw_warn(" not force set rx rsp rate\n");
 			goto SETPARA;
@@ -2703,21 +2661,21 @@ static int skw_iwpriv_set_force_rx_rsp_rate(struct skw_iface *iface, void *param
 		} else {
 			goto SETFAIL;
 		}
-	} else if (parmas_len > 1) {
+	} else if (params_len > 1) {
 		p = strchr(args, ',');
 		if (!p) {
 			skw_err("flag not found\n");
 			return -ENOTSUPP;
 		}
 
-		skw_dbg("params found %s\n", p - 1);
+		skw_dbg("params found %s\n", args);
 
-		rate.enable = skw_simple_strtol(p - 1, NULL, 10);
-		if (rate.enable != 0 && rate.enable != 1) {
-			skw_err("flag error %d\n", rate.enable);
-			return -EINVAL;
-		}
-
+		ret = skw_iwpriv_parse_number(args, &parsed);
+		if (ret)
+			return ret;
+		if (parsed < 0 || parsed > 1)
+			return -ERANGE;
+		rate.enable = parsed;
 		if (rate.enable == 0) {
 			skw_err("not set rx rsp rate params\n");
 			goto SETPARA;
@@ -2732,7 +2690,12 @@ static int skw_iwpriv_set_force_rx_rsp_rate(struct skw_iface *iface, void *param
 		return -ENOTSUPP;
 	}
 
-	val = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	val = parsed;
 	if (!skw_is_value_in_enum(val)) {
 		skw_warn("invalid 11b long rate %d\n", val);
 		return -EINVAL;
@@ -2748,7 +2711,12 @@ static int skw_iwpriv_set_force_rx_rsp_rate(struct skw_iface *iface, void *param
 		return -ENOTSUPP;
 	}
 
-	val = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	val = parsed;
 	if (!skw_is_value_in_enum(val)) {
 		skw_warn("invalid 11b short rate %d\n", val);
 		return -EINVAL;
@@ -2764,7 +2732,12 @@ static int skw_iwpriv_set_force_rx_rsp_rate(struct skw_iface *iface, void *param
 		return -ENOTSUPP;
 	}
 
-	val = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
+	ret = skw_iwpriv_parse_field(p + 1, q ? q - p - 1 : strlen(p + 1), 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	val = parsed;
 	if (!skw_is_value_in_enum(val)) {
 		skw_warn("invalid ofdm rate %d\n", val);
 		return -EINVAL;
@@ -2792,19 +2765,15 @@ SETFAIL:
 static int skw_iwpriv_set_scan_time(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	char *p = NULL, *q = NULL;
 	struct skw_set_scan_time time = {0};
-	u8 parmas_len = 0;
-	u16 val = 0;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
 	skw_dbg("args: %s\n", args);
-
-	/* parse rts rate flag */
-	parmas_len = strlen(args);
 
 	p = args;
 	q = strchr(args, ',');
@@ -2813,14 +2782,13 @@ static int skw_iwpriv_set_scan_time(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	skw_dbg("params found %s\n", p - 1);
-	val = skw_iwpriv_convert_string_to_u(p, q - p);
-	if (val > 0xFF) {
-		skw_warn("active dwell limit to 0xFF\n");
-		time.active_dwell_time = 0xFF;
-	} else {
-		time.active_dwell_time = val;
-	}
+	skw_dbg("params found %s\n", args);
+	ret = skw_iwpriv_parse_field(p, q - p, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
+	time.active_dwell_time = min_t(long long, parsed, 0xff);
 
 	skw_dbg("active dwell time: %d\n", time.active_dwell_time);
 
@@ -2830,13 +2798,12 @@ static int skw_iwpriv_set_scan_time(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	val = skw_simple_strtol(p, NULL, 10);
-	if (val != 0 && val != 1) {
-		skw_err("flag error %d\n", val);
-		return -EINVAL;
-	}
-
-	time.bypass_active_acan_auto_time = val;
+	ret = skw_iwpriv_parse_number(p, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 1)
+		return -ERANGE;
+	time.bypass_active_acan_auto_time = parsed;
 
 	skw_dbg("bypass active scan auto time: %d\n", time.bypass_active_acan_auto_time);
 
@@ -2853,18 +2820,22 @@ static int skw_iwpriv_set_scan_time(struct skw_iface *iface, void *param,
 static int skw_iwpriv_set_tcpd_wakeup_host(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	struct skw_set_tcpd_wakeup_host set_flag = {0};
-	u8 parmas_len = 0;
+	size_t params_len;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
 	skw_dbg("set_tcpd_wakeup_host args %s\n", args);
 
-	parmas_len = strlen(args);
-	if (parmas_len == 1) {
-		ret = skw_simple_strtol(args, NULL, 10);
+	params_len = strlen(args);
+	if (params_len == 1) {
+		ret = skw_iwpriv_parse_number(args, &parsed);
+		if (ret)
+			return ret;
+		ret = parsed;
 		if (!ret) {
 			skw_dbg("flag: %d\n", ret);
 			set_flag.enable = 0;
@@ -2874,7 +2845,7 @@ static int skw_iwpriv_set_tcpd_wakeup_host(struct skw_iface *iface, void *param,
 		} else {
 			goto SETFAIL;
 		}
-	} else if (parmas_len > 1) {
+	} else if (params_len > 1) {
 		skw_err("params error\n");
 		goto SETFAIL;
 	}
@@ -2893,28 +2864,35 @@ static int skw_iwpriv_set_tcpd_wakeup_host(struct skw_iface *iface, void *param,
 SETFAIL:
 	sprintf(resp, "set tcp disc wakeup host failed(param error)");
 
-	return ret;
+	return -EINVAL;
 }
 
 static int skw_iwpriv_set_rc_min_rate(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	struct skw_set_rate_control_min_rate rate = {0};
-	u8 parmas_len = 0, val = 0;
+	size_t params_len;
+	u8 val = 0;
 	char *p = NULL;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
 	skw_dbg("set_rc_min_rate args %s\n", args);
 
-	parmas_len = strlen(args);
-	if (!parmas_len)
+	params_len = strlen(args);
+	if (!params_len)
 		return -EINVAL;
 
 	p = args;
-	val = (u8)skw_iwpriv_convert_string_to_u(p, parmas_len);
+	ret = skw_iwpriv_parse_field(p, params_len, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	val = parsed;
 	if (!skw_is_value_in_enum(val)) {
 		skw_dbg("val not valid %d\n", val);
 		goto SETFAIL;
@@ -2935,17 +2913,18 @@ static int skw_iwpriv_set_rc_min_rate(struct skw_iface *iface, void *param,
 SETFAIL:
 	sprintf(resp, "set rc min rate failed (value not support)");
 
-	return ret;
+	return -EINVAL;
 }
 
 static int skw_iwpriv_set_rc_rate_change(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	char *p = NULL, *q = NULL;
 	struct skw_set_rate_control_rate_change rate = {0};
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
 	skw_dbg("set_rc_rate_change args %s\n", args);
@@ -2958,7 +2937,12 @@ static int skw_iwpriv_set_rc_rate_change(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	rate.up_rate_class_num = (u8)skw_iwpriv_convert_string_to_u(p, q - p);
+	ret = skw_iwpriv_parse_field(p, q - p, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	rate.up_rate_class_num = parsed;
 
 	skw_dbg("up_rate_class_num: %d\n", rate.up_rate_class_num);
 
@@ -2970,7 +2954,12 @@ static int skw_iwpriv_set_rc_rate_change(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	rate.down_rate_class_num = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	rate.down_rate_class_num = parsed;
 
 	skw_dbg("down_rate_class_num: %d\n", rate.down_rate_class_num);
 
@@ -2982,7 +2971,12 @@ static int skw_iwpriv_set_rc_rate_change(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	rate.hw_rty_limit = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	rate.hw_rty_limit = parsed;
 	skw_dbg("hw_rty_limit: %d\n", rate.hw_rty_limit);
 
 	//4/5 per rate hw rty limit
@@ -2993,7 +2987,12 @@ static int skw_iwpriv_set_rc_rate_change(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	rate.per_rate_hw_rty_limit = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	rate.per_rate_hw_rty_limit = parsed;
 
 	skw_dbg("per rate hw_rty_limit: %d\n", rate.per_rate_hw_rty_limit);
 
@@ -3005,7 +3004,12 @@ static int skw_iwpriv_set_rc_rate_change(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	rate.per_rate_probe_hw_rty_limit = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
+	ret = skw_iwpriv_parse_field(p + 1, q ? q - p - 1 : strlen(p + 1), 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	rate.per_rate_probe_hw_rty_limit = parsed;
 
 	skw_dbg("per rate probe hw_rty_limit: %d\n", rate.per_rate_probe_hw_rty_limit);
 
@@ -3022,20 +3026,27 @@ static int skw_iwpriv_set_rc_rate_change(struct skw_iface *iface, void *param,
 static int skw_iwpriv_set_rc_spe_rate(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	struct skw_set_rate_control_special_rate rate = {0};
-	u8 parmas_len = 0, val = 0;
+	size_t params_len;
+	u8 val = 0;
 	char *p = NULL;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
-	parmas_len = strlen(args);
-	if (!parmas_len)
+	params_len = strlen(args);
+	if (!params_len)
 		return -EINVAL;
 
 	p = args;
-	val = (u8)skw_iwpriv_convert_string_to_u(p, parmas_len);
+	ret = skw_iwpriv_parse_field(p, params_len, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	val = parsed;
 	if (!skw_is_value_in_enum(val)) {
 		skw_dbg("val not valid %d\n", val);
 		goto SETFAIL;
@@ -3056,7 +3067,7 @@ static int skw_iwpriv_set_rc_spe_rate(struct skw_iface *iface, void *param,
 SETFAIL:
 	sprintf(resp, "set rc spe rate failed (value not support)");
 
-	return ret;
+	return -EINVAL;
 }
 
 static int skw_generic_tlv_operation(struct wiphy *wiphy, struct net_device *dev,
@@ -3122,20 +3133,26 @@ static int skw_set_tx_lifetime(struct wiphy *wiphy, struct net_device *dev,
 static int skw_iwpriv_set_tx_lifetime(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	struct skw_tlv_set_tx_lifetime lftm = {0};
-	u8 parmas_len = 0;
+	size_t params_len;
 	char *p = NULL;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
-	parmas_len = strlen(args);
-	if (!parmas_len)
+	params_len = strlen(args);
+	if (!params_len)
 		return -EINVAL;
 
 	p = args;
-	lftm.lifetime = skw_iwpriv_convert_string_to_u(p, parmas_len);
+	ret = skw_iwpriv_parse_field(p, params_len, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xffff)
+		return -ERANGE;
+	lftm.lifetime = parsed;
 
 	skw_dbg("set tx lifetime: %d\n", lftm.lifetime);
 
@@ -3159,20 +3176,26 @@ static int skw_set_tx_retry_cnt(struct wiphy *wiphy, struct net_device *dev,
 static int skw_iwpriv_set_tx_retry_cnt(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	struct skw_tlv_set_retry_cnt cnt = {0};
-	u8 parmas_len = 0;
+	size_t params_len;
 	char *p = NULL;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
-	parmas_len = strlen(args);
-	if (!parmas_len)
+	params_len = strlen(args);
+	if (!params_len)
 		return -EINVAL;
 
 	p = args;
-	cnt.rtycnt = (u8)skw_iwpriv_convert_string_to_u(p, parmas_len);
+	ret = skw_iwpriv_parse_field(p, params_len, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	cnt.rtycnt = parsed;
 
 	skw_dbg("set tx retry cnt: %d\n", cnt.rtycnt);
 
@@ -3196,20 +3219,26 @@ static int skw_set_tx_rts_thrd(struct wiphy *wiphy, struct net_device *dev,
 static int skw_iwpriv_set_tx_rts_thrd(struct skw_iface *iface, void *param,
 	char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	struct skw_tlv_set_tx_rts_thrd thrd = {0};
-	u8 parmas_len = 0;
+	size_t params_len;
 	char *p = NULL;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
-	parmas_len = strlen(args);
-	if (!parmas_len)
+	params_len = strlen(args);
+	if (!params_len)
 		return -EINVAL;
 
 	p = args;
-	thrd.rts_thrd = skw_iwpriv_convert_string_to_u(p, parmas_len);
+	ret = skw_iwpriv_parse_field(p, params_len, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xffff)
+		return -ERANGE;
+	thrd.rts_thrd = parsed;
 
 	skw_dbg("set tx rts thrd: %d\n", thrd.rts_thrd);
 
@@ -3233,19 +3262,23 @@ static int skw_set_rx_sepcial_80211_frame(struct wiphy *wiphy, struct net_device
 static int skw_iwpriv_set_rx_sepcial_80211_frame(struct skw_iface *iface, void *param,
 	char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	char *p = NULL, *q = NULL;
 	struct skw_tlv_set_rx_special_80211_frame frm = {0};
-	u8 parmas_len = 0;
+	size_t params_len;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
 	skw_dbg("set_rx_sepcial_80211_frame args %s\n", args);
 
-	parmas_len = strlen(args);
-	if (parmas_len == 1) {
-		ret = skw_simple_strtol(args, NULL, 10);
+	params_len = strlen(args);
+	if (params_len == 1) {
+		ret = skw_iwpriv_parse_number(args, &parsed);
+		if (ret)
+			return ret;
+		ret = parsed;
 		if (!ret) {
 			skw_warn("disable rx\n");
 			frm.en = 0;
@@ -3256,7 +3289,7 @@ static int skw_iwpriv_set_rx_sepcial_80211_frame(struct skw_iface *iface, void *
 		} else {
 			goto SETFAIL;
 		}
-	} else if (parmas_len > 1) {
+	} else if (params_len > 1) {
 		p = args;
 		q = strchr(args, ',');
 		if (!p || !q) {
@@ -3264,12 +3297,12 @@ static int skw_iwpriv_set_rx_sepcial_80211_frame(struct skw_iface *iface, void *
 			return -ENOTSUPP;
 		}
 
-		frm.en = (u8)skw_iwpriv_convert_string_to_u(p, q - p);
-		if (frm.en != 0 && frm.en != 1) {
-			skw_err("flag error %d\n", frm.en);
-			return -EINVAL;
-		}
-
+		ret = skw_iwpriv_parse_field(p, q - p, 0, &parsed);
+		if (ret)
+			return ret;
+		if (parsed < 0 || parsed > 1)
+			return -ERANGE;
+		frm.en = parsed;
 		if (frm.en == 0) {
 			skw_warn("disable rx\n");
 			frm.en = 0;
@@ -3286,7 +3319,12 @@ static int skw_iwpriv_set_rx_sepcial_80211_frame(struct skw_iface *iface, void *
 		return -ENOTSUPP;
 	}
 
-	frm.type = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	frm.type = parsed;
 
 	skw_dbg("type: %d\n", frm.type);
 
@@ -3297,7 +3335,12 @@ static int skw_iwpriv_set_rx_sepcial_80211_frame(struct skw_iface *iface, void *
 		return -ENOTSUPP;
 	}
 
-	frm.sub_type = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
+	ret = skw_iwpriv_parse_field(p + 1, q ? q - p - 1 : strlen(p + 1), 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	frm.sub_type = parsed;
 
 	skw_dbg("sub type: %d\n", frm.sub_type);
 
@@ -3328,12 +3371,12 @@ static int skw_set_rx_update_nav(struct wiphy *wiphy, struct net_device *dev,
 static int skw_iwpriv_set_rx_update_nav(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	char *p = NULL, *q = NULL;
 	struct skw_tlv_set_rx_update_nav nav = {0};
-	int temp_val = 0;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
 	skw_dbg("args %s\n", args);
@@ -3346,29 +3389,33 @@ static int skw_iwpriv_set_rx_update_nav(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	} else {
 		skw_dbg("params found %s\n", p);
-		temp_val = skw_simple_strtol(p, NULL, 10);
-		if (temp_val >= 0 || temp_val < -255) {
-			skw_warn("parameter error %d\n", temp_val);
+		ret = skw_iwpriv_parse_number(p, &parsed);
+		if (ret)
+			return ret;
+		if (parsed >= 0 || parsed < -255) {
+			skw_warn("parameter error %lld\n", parsed);
 			return -EINVAL;
 		}
-		nav.intra_rssi = 0x80 | (0 - temp_val);
+		nav.intra_rssi = 0x80 | (0 - parsed);
 	}
 	skw_dbg("intra rssi: %d\n", nav.intra_rssi);
 
 	p = q;
 	q = strchr(p + 1, ',');
-	if(!p || !p)
+	if (!q)
 	{
 		skw_err("parameter error\n");
 		return -ENOTSUPP;
 	} else {
 		skw_dbg("params found %s\n", p + 1);
-		temp_val = skw_simple_strtol(p + 1, NULL, 10);
-		if (temp_val >= 0 || temp_val < -255) {
-			skw_warn("parameter error %d\n", temp_val);
+		ret = skw_iwpriv_parse_number(p + 1, &parsed);
+		if (ret)
+			return ret;
+		if (parsed >= 0 || parsed < -255) {
+			skw_warn("parameter error %lld\n", parsed);
 			return -EINVAL;
 		}
-		nav.basic_rssi = 0x80 | (0 - temp_val);
+		nav.basic_rssi = 0x80 | (0 - parsed);
 	}
 	skw_dbg("basic rssi: %d\n", nav.basic_rssi);
 
@@ -3379,7 +3426,12 @@ static int skw_iwpriv_set_rx_update_nav(struct skw_iface *iface, void *param,
 		skw_warn("nav max time not found\n");
 		return -ENOTSUPP;
 	} else {
-		 nav.nav_max_time = skw_simple_strtol(p, NULL, 10);
+		ret = skw_iwpriv_parse_number(p, &parsed);
+		if (ret)
+			return ret;
+		if (parsed < 0 || parsed > 0xff)
+			return -ERANGE;
+		nav.nav_max_time = parsed;
 	}
 	skw_dbg("nav max time: %d\n", nav.nav_max_time);
 
@@ -3405,11 +3457,12 @@ static int skw_set_apgo_timap(struct wiphy *wiphy, struct net_device *dev,
 static int skw_iwpriv_set_apgo_timap(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	char *p = NULL, *q = NULL;
 	struct skw_tlv_set_apgo_timap timap = {0};
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
 	skw_dbg("set_apgo_timap args %s\n", args);
@@ -3421,28 +3474,43 @@ static int skw_iwpriv_set_apgo_timap(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	timap.dtimforce0 = (u8)skw_iwpriv_convert_string_to_u(p, q - p);
+	ret = skw_iwpriv_parse_field(p, q - p, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	timap.dtimforce0 = parsed;
 	skw_dbg("dtim force0: %d\n", timap.dtimforce0);
 
 	p = q;
 	q = strchr(p + 1, ',');
-	if (!p || !p) {
+	if (!q) {
 		skw_err("parameter error\n");
 		return -ENOTSUPP;
 	}
 
-	timap.dtimforce1 = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	timap.dtimforce1 = parsed;
 
 	skw_dbg("dtim force1: %d\n", timap.dtimforce1);
 
 	p = q;
 	q = strchr(p + 1, ',');
-	if (!p || !p) {
+	if (!q) {
 		skw_err("parameter error\n");
 		return -ENOTSUPP;
 	}
 
-	timap.timforce0 = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
+	ret = skw_iwpriv_parse_field(p + 1, q - p - 1, 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	timap.timforce0 = parsed;
 	skw_dbg("tim force0: %d\n", timap.timforce0);
 
 	p = q;
@@ -3452,7 +3520,12 @@ static int skw_iwpriv_set_apgo_timap(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	timap.timforce1 = (u8)skw_iwpriv_convert_string_to_u(p + 1, q - p - 1);
+	ret = skw_iwpriv_parse_field(p + 1, q ? q - p - 1 : strlen(p + 1), 0, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xff)
+		return -ERANGE;
+	timap.timforce1 = parsed;
 	skw_dbg("tim force1: %d\n", timap.timforce1);
 
 	ret = skw_set_apgo_timap(iface->wdev.wiphy, iface->ndev, &timap);
@@ -3476,16 +3549,20 @@ static int skw_set_dbdc_disable(struct wiphy *wiphy, struct net_device *dev,
 static int skw_iwpriv_set_dbdc_disable(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	struct skw_tlv_set_dbdc_disable set_flag = {0};
-	u8 parmas_len = 0;
+	size_t params_len;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
-	parmas_len = strlen(args);
-	if (parmas_len == 1) {
-		ret = skw_simple_strtol(args, NULL, 10);
+	params_len = strlen(args);
+	if (params_len == 1) {
+		ret = skw_iwpriv_parse_number(args, &parsed);
+		if (ret)
+			return ret;
+		ret = parsed;
 		if (!ret) {
 			skw_dbg("flag: %d\n", ret);
 			set_flag.disable = 0;
@@ -3495,7 +3572,7 @@ static int skw_iwpriv_set_dbdc_disable(struct skw_iface *iface, void *param,
 		} else {
 			goto SETFAIL;
 		}
-	} else if (parmas_len > 1) {
+	} else if (params_len > 1) {
 		skw_err("params error\n");
 		goto SETFAIL;
 	}
@@ -3513,7 +3590,7 @@ static int skw_iwpriv_set_dbdc_disable(struct skw_iface *iface, void *param,
 SETFAIL:
 	sprintf(resp, "set failed(param error)");
 
-	return ret;
+	return -EINVAL;
 }
 
 //TLV 150
@@ -3528,15 +3605,15 @@ static int skw_set_assign_address_val(struct wiphy *wiphy, struct net_device *de
 static int skw_iwpriv_set_assign_address_val(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	char *p = NULL, *q = NULL;
 	struct skw_tlv_set_assign_addr_val params = {0};
-	u8 parmas_len = 0, remain_len = 0;
+	size_t remain_len;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
-	parmas_len = strlen(args);
 	skw_warn("args %s\n", args);
 
 	p = args;
@@ -3546,17 +3623,31 @@ static int skw_iwpriv_set_assign_address_val(struct skw_iface *iface, void *para
 		return -ENOTSUPP;
 	}
 
-	params.addr = skw_iwpriv_convert_string_to_u32(p, q - p);
+	if (q - p < 2 || p[0] != '0' || (p[1] != 'x' && p[1] != 'X'))
+		return -EINVAL;
+	ret = skw_iwpriv_parse_field(p, q - p, 16, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xffffffffLL)
+		return -ERANGE;
+	params.addr = parsed;
 	skw_dbg("addr: 0x%08x\n", params.addr);
 
 	p = q;
-	remain_len = parmas_len - (q - p) - 1;
+	remain_len = strlen(p + 1);
 	if (!p) {
 		skw_err("param error\n");
 		return -ENOTSUPP;
 	}
 
-	params.val = skw_iwpriv_convert_string_to_u32(p + 1, remain_len);
+	if (remain_len < 2 || p[1] != '0' || (p[2] != 'x' && p[2] != 'X'))
+		return -EINVAL;
+	ret = skw_iwpriv_parse_field(p + 1, remain_len, 16, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xffffffffLL)
+		return -ERANGE;
+	params.val = parsed;
 	skw_dbg("val: 0x%08x\n", params.val);
 
 	ret = skw_set_assign_address_val(iface->wdev.wiphy, iface->ndev, &params);
@@ -3580,16 +3671,17 @@ static int skw_read_addr(struct wiphy *wiphy, struct net_device *dev,
 static int skw_iwpriv_read_addr(struct skw_iface *iface, void *param,
 		char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	char *p = NULL;
 	struct skw_tlv_get_assign_addr params = {0};
-	u8 parmas_len = 0;
+	size_t params_len;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
-	parmas_len = strlen(args);
-	if (!parmas_len || parmas_len > 10) {
+	params_len = strlen(args);
+	if (!params_len || params_len > 10) {
 		skw_err("params error\n");
 		return -ENOTSUPP;
 	}
@@ -3602,7 +3694,14 @@ static int skw_iwpriv_read_addr(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	params.addr = skw_iwpriv_convert_string_to_u32(p, parmas_len);
+	if (params_len < 2 || p[0] != '0' || (p[1] != 'x' && p[1] != 'X'))
+		return -EINVAL;
+	ret = skw_iwpriv_parse_field(p, params_len, 16, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0 || parsed > 0xffffffffLL)
+		return -ERANGE;
+	params.addr = parsed;
 	skw_dbg("addr: 0x%08x\n", params.addr);
 
 	ret = skw_read_addr(iface->wdev.wiphy, iface->ndev, &params);
@@ -3624,12 +3723,12 @@ static int skw_set_ageout_thrd(struct wiphy *wiphy, struct net_device *dev, stru
 static int skw_iwpriv_set_ageout_thrd(struct skw_iface *iface, void *param,
 	char *args, char *resp, int resp_len)
 {
+	long long parsed;
 	int ret = 0;
 	char *p = NULL, *q = NULL;
 	struct skw_tlv_set_ageout_thrd thrd = {0};
-	u16 temp_val = 0;
 
-	if (!args)
+	if (!args || !*args)
 		return -EINVAL;
 
 	skw_dbg("args %s\n", args);
@@ -3641,12 +3740,16 @@ static int skw_iwpriv_set_ageout_thrd(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	temp_val = skw_simple_strtol(p, NULL, 10);
-	if (temp_val >= 0xFF) {
-		skw_warn("parameter out of range (0 ~ 255) %d\n", temp_val);
+	ret = skw_iwpriv_parse_number(p, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
+	if (parsed >= 0xFF) {
+		skw_warn("parameter out of range (0 ~ 255) %lld\n", parsed);
 		thrd.ageout_kick_thrd = 0xFF;
 	} else {
-		thrd.ageout_kick_thrd  = temp_val;
+		thrd.ageout_kick_thrd  = parsed;
 	}
 
 	skw_dbg("tbtt cnt, kick out %d\n", thrd.ageout_kick_thrd);
@@ -3658,12 +3761,16 @@ static int skw_iwpriv_set_ageout_thrd(struct skw_iface *iface, void *param,
 		return -ENOTSUPP;
 	}
 
-	temp_val = skw_simple_strtol(p, NULL, 10);
-	if (temp_val >= 0xFF) {
-		skw_warn("parameter out of range (0 ~ 255) %d\n", temp_val);
+	ret = skw_iwpriv_parse_number(p, &parsed);
+	if (ret)
+		return ret;
+	if (parsed < 0)
+		return -ERANGE;
+	if (parsed >= 0xFF) {
+		skw_warn("parameter out of range (0 ~ 255) %lld\n", parsed);
 		thrd.ageout_keep_alive_thrd = 0xFF;
 	} else {
-		thrd.ageout_keep_alive_thrd  = temp_val;
+		thrd.ageout_keep_alive_thrd  = parsed;
 	}
 
 	skw_dbg("keep alive send null thrd: %d\n", thrd.ageout_keep_alive_thrd);
@@ -3725,8 +3832,8 @@ static int skw_iwpriv_set_params(struct skw_iface *iface, void *param,
 {
 	int ret = 0;
 	char *p = NULL, *q = NULL;
-	u32 params[16] = {0};
-	u32 params_num = 0;
+	long long params[16] = {0};
+	u32 params_num = 0, i;
 	struct skw_tlv_set_ap_new_channel new_chan = {0};
 	struct skw_tlv_set_tx_retry_limit_en txr_limit = {0};
 	struct skw_tlv_set_report_cqm_rssi_low_itvl itvl = {0};
@@ -3743,7 +3850,11 @@ static int skw_iwpriv_set_params(struct skw_iface *iface, void *param,
 	p = args;
 
 	while (p) {
-		params[params_num] = skw_simple_strtol(p, NULL, 10);
+		if (params_num >= ARRAY_SIZE(params))
+			return -E2BIG;
+		ret = skw_iwpriv_parse_number(p, &params[params_num]);
+		if (ret)
+			return ret;
 		params_num++;
 
 		q = strchr(p, ',');
@@ -3764,6 +3875,11 @@ static int skw_iwpriv_set_params(struct skw_iface *iface, void *param,
 			if (params_num != 6) {
 				skw_warn("params error, need 6 totally\n");
 				return -EINVAL;
+			}
+
+			for (i = 1; i < params_num; i++) {
+				if (params[i] < 0 || params[i] > 0xff)
+					return -ERANGE;
 			}
 
 			new_chan.chan = params[1];
@@ -3810,6 +3926,11 @@ static int skw_iwpriv_set_params(struct skw_iface *iface, void *param,
 				return -EINVAL;
 			}
 
+			for (i = 1; i < params_num; i++) {
+				if (params[i] < 0 || params[i] > 0xffff)
+					return -ERANGE;
+			}
+
 			itvl.report_cqm_low_intvl_min_dur = params[1];
 			itvl.report_cqm_low_intvl_max_dur = params[2];
 
@@ -3823,6 +3944,11 @@ static int skw_iwpriv_set_params(struct skw_iface *iface, void *param,
 				return -EINVAL;
 			}
 
+			for (i = 1; i < params_num; i++) {
+				if (params[i] < -32768 || params[i] > 32767)
+					return -ERANGE;
+			}
+
 			thrd.thm_high_thrd_tx_suspend = (s16)params[1];
 			thrd.thm_low_thrd_tx_resume = (s16)params[2];
 
@@ -3832,9 +3958,19 @@ static int skw_iwpriv_set_params(struct skw_iface *iface, void *param,
 			break;
 
 		case 6:
-			if (params_num != 7) {
-				skw_warn("params error, need 7 totally\n");
+			if (params_num != 7 && params_num != 8) {
+				skw_warn("params error, need 7 or 8 totally\n");
 				return -EINVAL;
+			}
+
+			if (params[1] < 0 || params[1] > 0xff ||
+			    params[5] < 0 || params[5] > 0xffff ||
+			    params[6] < 0 || params[6] > 0xff ||
+			    params[7] < 0 || params[7] > 0xff)
+				return -ERANGE;
+			for (i = 2; i <= 4; i++) {
+				if (params[i] < 0 || params[i] > 0xffffffffLL)
+					return -ERANGE;
 			}
 
 			twt_params.en = params[1];
@@ -3843,6 +3979,7 @@ static int skw_iwpriv_set_params(struct skw_iface *iface, void *param,
 			twt_params.interval = params[4];
 			twt_params.duration = params[5];
 			twt_params.duration_unit = params[6];
+			/* Subtype is optional and defaults to zero. */
 			twt_params.sub_type = params[7];
 
 			ret = skw_partial_twt_sched(iface->wdev.wiphy, iface->ndev, &twt_params);
@@ -3855,6 +3992,8 @@ static int skw_iwpriv_set_params(struct skw_iface *iface, void *param,
 				return -EINVAL;
 			}
 
+			if (params[1] < 0 || params[1] > 0xff)
+				return -ERANGE;
 			normal_scan_params.en = params[1];
 			ret = skw_set_normal_scan_with_acs(iface->wdev.wiphy, iface->ndev, &normal_scan_params);
 			skw_dbg("set normal scan with acs %d done\n", normal_scan_params.en);
@@ -3865,6 +4004,8 @@ static int skw_iwpriv_set_params(struct skw_iface *iface, void *param,
 				skw_warn("params error, need 2 totally    \n");
 				return -EINVAL;
 			}
+			if (params[1] < 0 || params[1] > 0xff)
+				return -ERANGE;
 			send_probe_req_cnt = params[1];
 			ret = skw_set_scan_send_probe_req_cnt(iface->wdev.wiphy, iface->ndev, send_probe_req_cnt);
 			skw_dbg("set scan send probe req cnt %d done\n", send_probe_req_cnt);

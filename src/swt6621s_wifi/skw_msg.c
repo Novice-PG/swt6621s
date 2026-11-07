@@ -308,7 +308,9 @@ static int skw_sta_rx_mgmt(struct skw_core *skw, struct skw_iface *iface,
 
 	iface->sta.last_seq_ctrl = seq_ctrl;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
 	skw_wdev_lock(&iface->wdev);
+#endif
 
 	switch (fc) {
 	case IEEE80211_STYPE_DISASSOC:
@@ -336,7 +338,9 @@ static int skw_sta_rx_mgmt(struct skw_core *skw, struct skw_iface *iface,
 		break;
 	}
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
 	skw_wdev_unlock(&iface->wdev);
+#endif
 
 	return ret;
 }
@@ -642,7 +646,7 @@ void skw_del_sta_event(struct skw_iface *iface, const u8 *addr, u16 reason)
 				 -5400, (void *)&mgmt,
 				 SKW_DEAUTH_FRAME_LEN, 0, GFP_ATOMIC);
 	} else {
-		cfg80211_del_sta(iface->ndev, addr, GFP_KERNEL);
+		skw_cfg80211_del_sta(iface->ndev, addr, GFP_KERNEL);
 	}
 }
 
@@ -1431,7 +1435,9 @@ static int skw_event_tx_frame(struct skw_core *skw, struct skw_iface *iface,
 				u.reassoc_req.variable);
 		}
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
 		skw_wdev_lock(&iface->wdev);
+#endif
 		core = &iface->sta.core;
 
 		if (ie_len <= SKW_2K_SIZE) {
@@ -1439,7 +1445,9 @@ static int skw_event_tx_frame(struct skw_core *skw, struct skw_iface *iface,
 			core->assoc_req_ie_len = ie_len;
 		}
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
 		skw_wdev_unlock(&iface->wdev);
+#endif
 
 		if (is_skw_sta_mode(iface)) {
 			ht_cap_ie = cfg80211_find_ie(WLAN_EID_HT_CAPABILITY, core->assoc_req_ie, core->assoc_req_ie_len);

@@ -1,7 +1,8 @@
 # swt6621s
 
 DKMS source and Debian packaging for the Seekwave SWT6621S (vs6621s) SDIO
-WiFi/BT driver stack, as used on the KickPi K2B V2 (Allwinner H618).
+WiFi/BT driver stack, as used on the KickPi K2B V2 (Allwinner H618). It can
+also be used on other boards, such as the KickPi K3B.
 
 ## Contents
 
@@ -24,6 +25,38 @@ Symbols that the in-tree (upstream) build takes from its Kconfig are provided
 for the out-of-tree build by `src/swt6621s-config.h`, which is force-included
 by the per-directory Makefiles. Keep it in sync with the reference kernel
 config when changing the build.
+
+## GPIO configuration
+
+The descriptor-based GPIO interface replaces the old `gpio_host_wake`,
+`gpio_chip_wake` and `gpio_chip_en` DT properties with `host-wake-gpios`,
+`chip-wake-gpios` and `chip-en-gpios`. Update board DTS files that use the old
+names; the GPIO polarity is taken from each `*-gpios` specifier. The old
+`chip_enable=<GPIO number>` module parameter is no longer supported. Describe
+that signal with `chip-en-gpios` in the device tree instead. Boards without
+these GPIO connections need no new properties.
+
+KickPi K3B and K2B V2 do not use these GPIO properties and require no GPIO
+configuration changes.
+
+## Firmware lookup
+
+Each of `skw_sdio_lite`, `swt6621s_wifi` and `skwbt` accepts its own optional
+`firmware_dir` module parameter. To look under `/lib/firmware/seekwave/`,
+configure all three modules, for example in a modprobe configuration file:
+
+```conf
+options skw_sdio_lite firmware_dir=seekwave
+options swt6621s_wifi firmware_dir=seekwave
+options skwbt firmware_dir=seekwave
+```
+
+The driver first looks for `<name>.<root-compatible>.<extension>` in that
+directory, then falls back to the generic `<name>` there. With the default
+empty `firmware_dir`, both lookups use the normal firmware search paths.
+The bundled firmware package installs generic files directly under
+`/lib/firmware/`; configure a subdirectory only when the required files are
+present there.
 
 ## Building the packages
 
@@ -63,7 +96,7 @@ modprobe skwbt
 ## Provenance
 
 The driver source was extracted from the vendor kernel tree shipped for the
-KickPi K2B V2 and, apart from the out-of-tree build support, is unchanged.
+KickPi K2B V2.
 The firmware blobs are redistributed as shipped by the board vendor.
 
 The driver is licensed under the GPL-2.0 (see the SPDX headers in the source

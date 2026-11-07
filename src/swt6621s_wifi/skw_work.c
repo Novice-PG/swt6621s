@@ -17,7 +17,7 @@
 
 #include <linux/skbuff.h>
 #include <linux/version.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
 #include <net/rps.h>
 #endif
 
@@ -103,16 +103,10 @@ int skw_init_rps_map(struct skw_iface *iface)
 	static DEFINE_SPINLOCK(rps_map_lock);
 	struct netdev_rx_queue *queue = iface->ndev->_rx;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
-	map = kzalloc(max_t(unsigned int,
-			    XPS_MAP_SIZE(cpumask_weight(cpu_online_mask)), L1_CACHE_BYTES),
-		      GFP_KERNEL);
-#else
 	map = kzalloc(max_t(unsigned int,
 			    RPS_MAP_SIZE(cpumask_weight(cpu_online_mask)), L1_CACHE_BYTES),
 		      GFP_KERNEL);
-#endif
-    if (!map)
+	if (!map)
 		return -ENOMEM;
 
 	i = 0;
@@ -399,14 +393,27 @@ int skw_queue_event_work(struct wiphy *wiphy, struct skw_event_work *work,
 			 struct sk_buff *skb)
 {
 	struct skw_core *skw = wiphy_priv(wiphy);
+	unsigned long flags;
 
-	if (!atomic_read(&work->enabled))
+	/* Serialize queueing with teardown before cancelling either work type. */
+	spin_lock_irqsave(&work->qlist.lock, flags);
+	if (!atomic_read(&work->enabled)) {
+		spin_unlock_irqrestore(&work->qlist.lock, flags);
 		return -EINVAL;
+	}
 
-	skb_queue_tail(&work->qlist, skb);
+	__skb_queue_tail(&work->qlist, skb);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	/* Interface events share cfg80211's locking and cancellation rules. */
+	if (work != &skw->event_work)
+		wiphy_work_queue(wiphy, &work->wiphy_work);
+	else
+#endif
 	if (!work_pending(&work->work))
 		queue_work(skw->event_wq, &work->work);
+
+	spin_unlock_irqrestore(&work->qlist.lock, flags);
 
 	return 0;
 }

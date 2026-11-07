@@ -501,7 +501,11 @@ struct skw_iface {
 			struct {
 				u32 cac_time_ms;
 				unsigned long flags;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+				struct wiphy_delayed_work cac_work;
+#else
 				struct delayed_work cac_work;
+#endif
 			} dfs;
 		} sap;
 
@@ -511,7 +515,11 @@ struct skw_iface {
 			bool is_wep;
 			bool report_deauth;
 			struct skw_sta_core core;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+			struct wiphy_work work;
+#else
 			struct work_struct work;
+#endif
 			struct skw_connect_param *conn;
 
 			struct {
@@ -626,30 +634,43 @@ static inline void skw_sta_assert_lock(struct skw_sta_core *core)
 	lockdep_assert_held(&core->lock);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+static inline void skw_wdev_lock(struct wireless_dev *wdev)
+	__acquires(&wdev->wiphy->mtx)
+{
+	wiphy_lock(wdev->wiphy);
+}
+
+static inline void skw_wdev_unlock(struct wireless_dev *wdev)
+	__releases(&wdev->wiphy->mtx)
+{
+	wiphy_unlock(wdev->wiphy);
+}
+
+static inline void skw_wdev_assert_lock(struct skw_iface *iface)
+{
+	lockdep_assert_held(&iface->wdev.wiphy->mtx);
+}
+#else
 static inline void skw_wdev_lock(struct wireless_dev *wdev)
 	__acquires(wdev)
 {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 15)
 	mutex_lock(&wdev->mtx);
 	__acquire(wdev->mtx);
-#endif
 }
 
 static inline void skw_wdev_unlock(struct wireless_dev *wdev)
 	__releases(wdev)
 {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 15)
 	__release(wdev->mtx);
-    mutex_unlock(&wdev->mtx);
-#endif
+	mutex_unlock(&wdev->mtx);
 }
 
 static inline void skw_wdev_assert_lock(struct skw_iface *iface)
 {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 15)
 	lockdep_assert_held(&iface->wdev.mtx);
-#endif
 }
+#endif
 
 struct skw_iface *skw_add_iface(struct wiphy *wiphy, const char *name,
 				enum nl80211_iftype iftype, u8 *mac,

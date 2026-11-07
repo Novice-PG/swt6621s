@@ -1,32 +1,45 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Compiler shim used by the DKMS MAKE command (and by the top-level module
-# Makefile for manual builds).
+# Use as Kbuild's command-line CC so every module compilation, including
+# Makefile.modfinal, uses the same compatibility handling. SWT_REAL_CC can
+# select a compiler other than ${CROSS_COMPILE}gcc.
 #
-# Kernels configured by a compiler that supports -fmin-function-alignment
-# (gcc >= 14) carry CONFIG_CC_HAS_MIN_FUNCTION_ALIGNMENT=y, and the kernel
-# build system then passes -fmin-function-alignment=8 to out-of-tree module
-# builds unconditionally -- including the .mod.o finalize stage
-# (scripts/Makefile.modfinal), which runs outside the module Makefile's reach.
-# Older compilers (e.g. Ubuntu 24.04's gcc-13) reject the option.
-#
-# Strip the option for such compilers; pass everything through unchanged
-# otherwise.
+# A prebuilt kernel can require -fmin-function-alignment even when the module
+# compiler lacks it. Preserve all flags when supported; otherwise use ordinary
+# function alignment and disable patchable entries. Ordinary alignment does
+# not guarantee the alignment required by arm64 ftrace call-ops.
 set -u
 
 real_cc="${SWT_REAL_CC:-${CROSS_COMPILE:-}gcc}"
-major="$("${real_cc}" -dumpversion 2>/dev/null | cut -d. -f1)"
 
-if [[ "${major}" =~ ^[0-9]+$ ]] && ((major < 14)); then
-	args=()
-	for arg in "$@"; do
-		case "${arg}" in
-			-fmin-function-alignment=*) ;;
-			*) args+=("${arg}") ;;
-		esac
-	done
-	exec "${real_cc}" "${args[@]}"
+needs_alignment=false
+for arg in "$@"; do
+	case "$arg" in
+		-fmin-function-alignment=*) needs_alignment=true; break ;;
+	esac
+done
+
+if [[ "$needs_alignment" == false ]]; then
+	exec "$real_cc" "$@"
 fi
 
-exec "${real_cc}" "$@"
+if "$real_cc" -Werror -fmin-function-alignment=8 -x c -c /dev/null \
+	-o /dev/null >/dev/null 2>&1; then
+	exec "$real_cc" "$@"
+fi
+
+args=()
+for arg in "$@"; do
+	case "$arg" in
+		-fmin-function-alignment=*)
+			args+=("-falign-functions=${arg#*=}")
+			;;
+		-fpatchable-function-entry=*)
+			args+=("-fpatchable-function-entry=0")
+			;;
+		*) args+=("$arg") ;;
+	esac
+done
+
+exec "$real_cc" "${args[@]}"

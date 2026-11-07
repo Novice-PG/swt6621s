@@ -29,6 +29,7 @@
 #include <linux/platform_device.h>
 #include <linux/if_tunnel.h>
 #include <linux/firmware.h>
+#include <linux/skw_firmware.h>
 #include <generated/utsrelease.h>
 #include <linux/suspend.h>
 
@@ -61,6 +62,17 @@ static u8 skw_mac[ETH_ALEN];
 static struct skw_global_config g_skw_config;
 
 static unsigned long skw_chip_idx = 0;
+
+static char *firmware_dir = "";
+module_param(firmware_dir, charp, 0444);
+MODULE_PARM_DESC(firmware_dir, "Firmware subdirectory within the standard firmware search paths");
+
+int skw_request_firmware(const struct firmware **fw, const char *name,
+			 struct device *dev, bool direct)
+{
+	return skw_firmware_request(fw, name, dev, firmware_dir,
+			direct ? request_firmware_direct : request_firmware);
+}
 
 static const int g_skw_up_to_ac[8] = {
 	SKW_WMM_AC_BE,
@@ -808,16 +820,16 @@ static int skw_set_android_suspend(struct wiphy *wiphy, struct net_device *dev,
 {
 	int ret = 0;
 	long val = 0;
-	char *endp = NULL;
 
 	skw_dbg("data: %s\n", suspend);
 
-	val = skw_simple_strtol(suspend, &endp, 0);
-	if (*endp != '\0' || (val != 0 && val != 1)) {
-		skw_err("endp: %d, val: %ld\n", *endp, val);
-
+	if (!suspend)
 		return -EINVAL;
-	}
+	ret = kstrtol(suspend, 0, &val);
+	if (ret)
+		return ret;
+	if (val != 0 && val != 1)
+		return -EINVAL;
 
 #ifdef CONFIG_SWT6621S_PRESUSPEND_SUPPORT
 	ret = skw_set_mib_bool(wiphy, SKW_NDEV_ID(dev),
@@ -877,7 +889,13 @@ static int skw_android_cmd(struct net_device *dev, void __user *priv_data)
 
 	if (IS_SKW_CMD(command, COUNTRY)) {
 		data = SKW_CMD_DATA(command, COUNTRY);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+		wiphy_lock(dev->ieee80211_ptr->wiphy);
+#endif
 		ret = skw_set_regdom(dev->ieee80211_ptr->wiphy, data);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+		wiphy_unlock(dev->ieee80211_ptr->wiphy);
+#endif
 		if (ret)
 			skw_chip_err(skw->idx, "skw_set_regdom failed, ret: %d\n", ret);
 	} else if (IS_SKW_CMD(command, BTCOEXSCAN_STOP)) {
@@ -924,7 +942,13 @@ static int skw_ioctl(struct net_device *dev, void __user *user_data)
 		if (strlen(country) != 2)
 			return -EINVAL;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+		wiphy_lock(dev->ieee80211_ptr->wiphy);
+#endif
 		ret = skw_set_regdom(dev->ieee80211_ptr->wiphy, country);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+		wiphy_unlock(dev->ieee80211_ptr->wiphy);
+#endif
 		if (ret)
 			skw_chip_err(skw->idx, "set regdom failed, ret: %d\n", ret);
 
@@ -2252,6 +2276,9 @@ static int skw_add_default_iface(struct wiphy *wiphy)
 	struct skw_core *skw = wiphy_priv(wiphy);
 
 	rtnl_lock();
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	wiphy_lock(wiphy);
+#endif
 
 	iface = skw_add_iface(wiphy, "wlan%d", NL80211_IFTYPE_STATION,
 				skw_mac, SKW_INVALID_ID, true);
@@ -2285,6 +2312,9 @@ static int skw_add_default_iface(struct wiphy *wiphy)
 #endif
 
 unlock:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	wiphy_unlock(wiphy);
+#endif
 	rtnl_unlock();
 
 	return ret;
@@ -2339,7 +2369,7 @@ int skw_calib_download(struct wiphy *wiphy, const char *fname)
 
 	skw_chip_dbg(skw->idx, "fw file: %s\n", fname);
 
-	ret = request_firmware(&fw, fname, &wiphy->dev);
+	ret = skw_request_firmware(&fw, fname, &wiphy->dev, false);
 	if (ret) {
 		skw_chip_err(skw->idx, "load %s failed, ret: %d\n", fname, ret);
 		return ret;
@@ -2360,7 +2390,14 @@ static int skw_drv_probe(struct platform_device *pdev)
 	struct skw_chip_info chip;
 	struct wiphy *wiphy = NULL;
 	struct skw_core *skw = NULL;
-	int idx = skw_add_chip_idx();
+	int idx;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+	struct sv6160_platform_data *pdata = dev_get_platdata(&pdev->dev);
+
+	if (pdata && pdata->service_ready && !pdata->service_ready())
+		return -EPROBE_DEFER;
+#endif
+	idx = skw_add_chip_idx();
 
 	skw_chip_info(idx, "chip: %d, MAC: %pM\n", idx, skw_mac);
 
@@ -2416,6 +2453,9 @@ static int skw_drv_probe(struct platform_device *pdev)
 	skw_init_mib(wiphy);
 
 	rtnl_lock();
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	wiphy_lock(wiphy);
+#endif
 
 	skw_set_wiphy_regd(wiphy, skw->country);
 
@@ -2423,6 +2463,9 @@ static int skw_drv_probe(struct platform_device *pdev)
 	    skw->config->regd.country[1] != '0')
 		skw_set_regdom(wiphy, skw->config->regd.country);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	wiphy_unlock(wiphy);
+#endif
 	rtnl_unlock();
 
 	ret = skw_add_default_iface(wiphy);
@@ -2457,7 +2500,7 @@ failed:
 	return ret;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 static void skw_drv_remove(struct platform_device *pdev)
 #else
 static int skw_drv_remove(struct platform_device *pdev)
@@ -2467,9 +2510,8 @@ static int skw_drv_remove(struct platform_device *pdev)
 	struct wiphy *wiphy;
 	struct skw_core *skw = platform_get_drvdata(pdev);
 
-	skw_chip_info(skw->idx, "%s\n", pdev->name);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 	if (!skw)
 		return;
 #else
@@ -2491,9 +2533,16 @@ static int skw_drv_remove(struct platform_device *pdev)
 	cfg80211_shutdown_all_interfaces(wiphy);
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	wiphy_lock(wiphy);
+#endif
+
 	for (i = 0; i < SKW_NR_IFACE; i++)
 		skw_del_iface(wiphy, skw->vif.iface[i]);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	wiphy_unlock(wiphy);
+#endif
 	rtnl_unlock();
 
 	wiphy_unregister(wiphy);
@@ -2510,11 +2559,11 @@ static int skw_drv_remove(struct platform_device *pdev)
 
 	skw_work_deinit(wiphy);
 
-	wiphy_free(wiphy);
-
 	skw_dec_chip_idx(skw->idx);
+
+	wiphy_free(wiphy);
     
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
     return;
 #else
     return 0;
@@ -2593,5 +2642,5 @@ module_param_array_named(mac, skw_mac, byte, NULL, 0444);
 MODULE_PARM_DESC(mac, "config mac address");
 
 MODULE_LICENSE("GPL v2");
-MODULE_VERSION("1.0.0");
+MODULE_VERSION("1.1.0");
 MODULE_AUTHOR("seekwavetech");

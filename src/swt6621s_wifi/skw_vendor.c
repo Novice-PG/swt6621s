@@ -250,7 +250,7 @@ static int skw_vendor_get_version(struct wiphy *wiphy, struct wireless_dev *wdev
 
 	switch (nla_type(data)) {
 	case SKW_ATTR_VERSION_DRIVER:
-		strncpy(version, SKW_VERSION, sizeof(version));
+		strscpy(version, SKW_VERSION, sizeof(version));
 		break;
 
 	case SKW_ATTR_VERSION_FIRMWARE:
@@ -260,7 +260,7 @@ static int skw_vendor_get_version(struct wiphy *wiphy, struct wireless_dev *wdev
 
 	default:
 		skw_chip_err(skw->idx, "invalid nla type\n");
-		strcpy(version, "invalid");
+		strscpy(version, "invalid", sizeof(version));
 		break;
 	}
 
@@ -281,7 +281,7 @@ static int skw_vendor_get_usable_channels(struct wiphy *wiphy,
 
 	max = ieee80211_get_num_supported_channels(wiphy);
 
-	chans = SKW_ZALLOC(max * sizeof(*chans), GFP_KERNEL);
+	chans = kcalloc(max, sizeof(*chans), GFP_KERNEL);
 	if (!chans)
 		return -ENOMEM;
 

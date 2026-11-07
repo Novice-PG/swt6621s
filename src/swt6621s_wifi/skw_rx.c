@@ -922,7 +922,7 @@ static void skw_reorder_force_release(struct skw_tid_rx *tid_rx,
 	    atomic_read(&tid_rx->reorder->ref_cnt) == tid_rx->ref_cnt &&
 	    (ieee80211_sn_less(tid_rx->reorder->expired.sn, to_sn) ||
 	     ieee80211_sn_less(to_sn, tid_rx->win_start)))
-		timer_delete(&tid_rx->reorder->timer);
+		skw_del_timer(&tid_rx->reorder->timer);
 
 	while (ieee80211_sn_less(tid_rx->win_start, target)) {
 		struct sk_buff_head *list;
@@ -976,7 +976,7 @@ static void skw_reorder_release(struct skw_reorder_rx *reorder,
 {
 	bool release = true;
 
-	u16 i, index;
+	u16 i, index, sn;
 	u16 win_start;
 	struct sk_buff *skb;
 	struct sk_buff_head *list;
@@ -991,12 +991,13 @@ static void skw_reorder_release(struct skw_reorder_rx *reorder,
 	for (i = 0; i < tid_rx->win_size; i++) {
 		if (tid_rx->stored_num == 0) {
 			if (timer_pending(&reorder->timer))
-				timer_delete(&reorder->timer);
+				skw_del_timer(&reorder->timer);
 
 			break;
 		}
 
-		index = (win_start + i) % tid_rx->win_size;
+		sn = ieee80211_sn_add(win_start, i);
+		index = sn % tid_rx->win_size;
 		list = &tid_rx->reorder_buf[index];
 
 		if (!skb_queue_len(list)) {
@@ -1010,11 +1011,11 @@ static void skw_reorder_release(struct skw_reorder_rx *reorder,
 		/* release timeout skb and reset reorder timer */
 		if (!release) {
 			if (!is_skw_msdu_timeout(reorder->skw, list)) {
-				skw_set_reorder_timer(tid_rx, win_start + i);
+				skw_set_reorder_timer(tid_rx, sn);
 				break;
 			}
 
-			skw_reorder_force_release(tid_rx, win_start + i,
+			skw_reorder_force_release(tid_rx, sn,
 					release_list, SKW_RELEASE_EXPIRED);
 			release = true;
 			continue;
@@ -1025,7 +1026,7 @@ static void skw_reorder_release(struct skw_reorder_rx *reorder,
 
 			if (timer_pending(&reorder->timer) &&
 			    reorder->expired.sn == tid_rx->win_start)
-				timer_delete(&reorder->timer);
+				skw_del_timer(&reorder->timer);
 
 			if (SKW_SKB_RXCB(skb)->amsdu_flags & SKW_AMSDU_FLAG_TAINT) {
 				__skb_queue_purge(list);
@@ -1045,14 +1046,14 @@ static void skw_reorder_release(struct skw_reorder_rx *reorder,
 
 				trace_skw_rx_reorder_release(reorder->inst,
 						reorder->peer_idx, reorder->tid,
-						win_start, win_start + i,
+						win_start, sn,
 						index, tid_rx->win_start,
 						tid_rx->stored_num);
 
 			} else {
 				/* AMSDU not ready and expired */
 				if (!timer_pending(&reorder->timer))
-					skw_set_reorder_timer(tid_rx, win_start + i);
+					skw_set_reorder_timer(tid_rx, sn);
 
 				break;
 			}
@@ -1224,7 +1225,7 @@ static void skw_ampdu_reorder(struct skw_core *skw, struct skw_rx_desc *desc,
 
 		if (timer_pending(&reorder->timer) &&
 			reorder->expired.sn == tid_rx->win_start)
-			timer_delete(&reorder->timer);
+			skw_del_timer(&reorder->timer);
 
 		tid_rx->win_start = ieee80211_sn_inc(tid_rx->win_start);
 
@@ -1252,7 +1253,7 @@ out:
 			skw_set_reorder_timer(tid_rx, desc->sn);
 	} else {
 		if (timer_pending(&reorder->timer))
-			timer_delete(&reorder->timer);
+			skw_del_timer(&reorder->timer);
 	}
 }
 
@@ -1671,7 +1672,7 @@ int skw_del_tid_rx(struct skw_peer *peer, u16 tid)
 
 	smp_wmb();
 
-	timer_delete_sync(&reorder->timer);
+	skw_del_timer_sync(&reorder->timer);
 
 	if (tid_rx) {
 #ifdef CONFIG_SWT6621S_GKI_DRV

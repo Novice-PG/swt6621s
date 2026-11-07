@@ -39,60 +39,51 @@ static struct skwifi_cfg *skw_cfg_match(struct skwifi_cfg *table, char *name)
 	return cfg;
 }
 
-static long skw_bool_flag(unsigned long *flags, int nr, char *value)
-{
-	char *endp;
-	long val = skw_simple_strtol(value, &endp, 0);
-
-	if (*endp != '\0')
-		return -EINVAL;
-
-	switch (val) {
-	case 0:
-		clear_bit(nr, flags);
-		break;
-
-	case 1:
-		set_bit(nr, flags);
-		break;
-
-	default:
-		break;
-	}
-
-	return val;
-}
-
-static void skw_get_mac_addr(char *buff, char *mac)
+static int skw_bool_flag(unsigned long *flags, int nr, char *value)
 {
 	long val;
-	int i, j, idx;
-	char chr, *endp;
-	char dat[8], addr[6] = {0};
-	int len = strlen(buff);
+	int ret;
 
-	for (i = 0, j = 0, idx = 0; i <= len; i++) {
-		chr = buff[i];
-		if (chr == ':')
-			chr ='\0';
+	ret = kstrtol(value, 0, &val);
+	if (ret)
+		return ret;
+	if (val == 0)
+		clear_bit(nr, flags);
+	else if (val == 1)
+		set_bit(nr, flags);
+	else
+		return -EINVAL;
 
-		if (j >= sizeof(dat))
-			break;
+	return 0;
+}
 
-		dat[j++] = chr;
+static int skw_get_mac_addr(char *text, char *mac)
+{
+	u8 addr[ETH_ALEN];
+	char *end, saved;
+	int i, ret;
 
-		if (chr == '\0') {
-			val = skw_simple_strtol(dat, &endp, 16);
-			if (val > 0xff)
-				break;
+	for (i = 0; i < ETH_ALEN; i++) {
+		end = strchr(text, ':');
+		if (!!end != (i < ETH_ALEN - 1))
+			return -EINVAL;
+		if (!end)
+			end = text + strlen(text);
+		if (end == text)
+			return -EINVAL;
 
-			j = 0;
-			addr[idx++] = val;
-		}
+		saved = *end;
+		*end = '\0';
+		ret = kstrtou8(text, 16, &addr[i]);
+		*end = saved;
+		if (ret)
+			return ret;
+		if (saved)
+			text = end + 1;
 	}
 
-	if (idx == ETH_ALEN || is_valid_ether_addr(addr))
-		skw_ether_copy(mac, addr);
+	skw_ether_copy(mac, addr);
+	return 0;
 }
 
 static void skw_set_string(char *buff, int buff_sz, char *src)
@@ -175,7 +166,7 @@ static int skw_read_line(struct skwifi_cfg_data *cfgd, char *buf, int buf_len)
 		}
 
 		if (do_save) {
-			if (len < buf_len)
+			if (len < buf_len - 1)
 				buf[len++] = chr;
 
 			total++;
@@ -260,8 +251,8 @@ static void skw_parser(struct skwifi_cfg *table, const u8 *data, int size)
 			if (!strlen(key) || !strlen(value))
 				break;
 
-			if (cfg && cfg->priv)
-				cfg->parser(cfg, key, value);
+			if (cfg && cfg->priv && cfg->parser(cfg, key, value))
+				skw_warn("invalid configuration: %s=%s\n", key, value);
 
 			break;
 
@@ -276,15 +267,14 @@ static void skw_parser(struct skwifi_cfg *table, const u8 *data, int size)
 
 static int skw_global_parser(struct skwifi_cfg *config, char *key, char *value)
 {
-	char *endp;
 	struct skw_cfg_global *cfg = config->priv;
 
 	if (!strcmp(key, "mac_addr")) {
-		skw_get_mac_addr(value, cfg->mac);
+		return skw_get_mac_addr(value, cfg->mac);
 	} else if (!strcmp(key, "dma_addr_align")) {
-		cfg->dma_addr_align = skw_simple_strtol(value, &endp, 0);
+		return kstrtou8(value, 0, &cfg->dma_addr_align);
 	} else if (!strcmp(key, "reorder_timeout")) {
-		cfg->reorder_timeout = skw_simple_strtol(value, &endp, 0);
+		return kstrtou8(value, 0, &cfg->reorder_timeout);
 	} else {
 		skw_dbg("unsupport key: %s\n", key);
 	}
@@ -294,15 +284,14 @@ static int skw_global_parser(struct skwifi_cfg *config, char *key, char *value)
 
 static int skw_firmware_parser(struct skwifi_cfg *config, char *key, char *value)
 {
-	char *endp;
 	struct skw_cfg_firmware *fw = config->priv;
 
 	if (!strcmp(key, "beacon_timeout")) {
-		fw->beacon_timeout = skw_simple_strtol(value, &endp, 0);
+		return kstrtou8(value, 0, &fw->beacon_timeout);
 	} else if (!strcmp(key, "cca_enable")) {
-		skw_bool_flag(&fw->flags, SKW_CFG_FIRMWARE_CCA_ENABLE, value);
+		return skw_bool_flag(&fw->flags, SKW_CFG_FIRMWARE_CCA_ENABLE, value);
 	} else if (!strcmp(key, "use_4addr")) {
-		skw_bool_flag(&fw->flags, SKW_CFG_FIRMWARE_USE_4ADDR, value);
+		return skw_bool_flag(&fw->flags, SKW_CFG_FIRMWARE_USE_4ADDR, value);
 	} else {
 		skw_dbg("unsupport key: %s\n", key);
 	}
@@ -312,11 +301,11 @@ static int skw_firmware_parser(struct skwifi_cfg *config, char *key, char *value
 
 static int skw_config_intf(struct skw_cfg_intf *intf, char *value)
 {
-	int i, len;
+	int i, len, ret;
 	char *chr, buff[SKW_LINE_BUFF_LEN];
 	int idx = 0, inst = 0;
 	bool exit = false;
-	char *endp, *pos = value;
+	char *pos = value;
 	struct skw_cfg_interface *ifa = &intf->interface[0];
 
 	/* <inst>,<mode>,<interface name>,<mac addr> */
@@ -331,19 +320,23 @@ static int skw_config_intf(struct skw_cfg_intf *intf, char *value)
 
 		if (!len) {
 			idx++;
+			if (exit)
+				break;
 			continue;
 		}
 
+		if (len >= sizeof(buff))
+			return -E2BIG;
 		memset(buff, 0x0, sizeof(buff));
 		memcpy(buff, pos, len);
 
 		switch (idx++) {
 		case 0:
-			inst = skw_simple_strtol(buff, &endp, 0);
-			if (inst >= SKW_NR_IFACE) {
-				exit = true;
-				break;
-			}
+			ret = kstrtoint(buff, 0, &inst);
+			if (ret)
+				return ret;
+			if (inst < 0 || inst >= SKW_NR_IFACE)
+				return -ERANGE;
 
 			ifa = &intf->interface[inst];
 			break;
@@ -370,17 +363,14 @@ static int skw_config_intf(struct skw_cfg_intf *intf, char *value)
 				break;
 			}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
-            strncpy(ifa->name, buff, IFNAMSIZ - 1);
-            ifa->name[IFNAMSIZ - 1] = '\0';
-#else
-			skw_strlcpy(ifa->name, buff, IFNAMSIZ);
-#endif
+			strscpy(ifa->name, buff, sizeof(ifa->name));
 
             break;
 
 		case 3:
-			skw_get_mac_addr(buff, ifa->mac);
+			ret = skw_get_mac_addr(buff, ifa->mac);
+			if (ret)
+				return ret;
 			break;
 		}
 
@@ -399,7 +389,7 @@ static int skw_intf_parser(struct skwifi_cfg *config, char *key, char *value)
 	struct skw_cfg_intf *intf = config->priv;
 
 	if (!strcmp(key, "intf")) {
-		skw_config_intf(intf, value);
+		return skw_config_intf(intf, value);
 	} else {
 		skw_dbg("unsupport key: %s\n", key);
 	}
@@ -412,9 +402,9 @@ static int skw_calib_parser(struct skwifi_cfg *config, char *key, char *value)
 	struct skw_cfg_calib *calib = config->priv;
 
 	if (!strcmp(key, "append_bus_name")) {
-		skw_bool_flag(&calib->flags, SKW_CFG_CALIB_APPEND_BUS_NAME, value);
+		return skw_bool_flag(&calib->flags, SKW_CFG_CALIB_APPEND_BUS_NAME, value);
 	} else if (!strcmp(key, "append_module_id")) {
-		skw_bool_flag(&calib->flags, SKW_CFG_CALIB_APPEND_MODULE_ID, value);
+		return skw_bool_flag(&calib->flags, SKW_CFG_CALIB_APPEND_MODULE_ID, value);
 	} else if (!strcmp(key, "chip_alias_name")) {
 		skw_set_string(calib->chip_alias_name, sizeof(calib->chip_alias_name), value);
 	} else if (!strcmp(key, "project_name")) {
@@ -431,18 +421,18 @@ static int skw_regdom_parser(struct skwifi_cfg *config, char *key, char *value)
 	struct skw_cfg_regd *regd = config->priv;
 
 	if (!strcmp(key, "self_managed")) {
-		skw_bool_flag(&regd->flags, SKW_CFG_REGD_SELF_MANAGED, value);
+		return skw_bool_flag(&regd->flags, SKW_CFG_REGD_SELF_MANAGED, value);
 	} else if (!strcmp(key, "country")) {
 		if (strlen(value) == 2) {
 			memcpy(regd->country, value, 2);
 			set_bit(SKW_CFG_REGD_DEFAULT_COUNTRY, &regd->flags);
 		}
 	} else if (!strcmp(key, "ignore_user_hint")) {
-		skw_bool_flag(&regd->flags, SKW_CFG_REGD_IGNORE_USER_HINT, value);
+		return skw_bool_flag(&regd->flags, SKW_CFG_REGD_IGNORE_USER_HINT, value);
 	} else if (!strcmp(key, "ignore_country_ie")) {
-		skw_bool_flag(&regd->flags, SKW_CFG_REGD_IGNORE_COUNTRY_IE, value);
+		return skw_bool_flag(&regd->flags, SKW_CFG_REGD_IGNORE_COUNTRY_IE, value);
 	} else if (!strcmp(key, "outdoor")) {
-		skw_bool_flag(&regd->flags, SKW_CFG_REGD_OUTDOOR, value);
+		return skw_bool_flag(&regd->flags, SKW_CFG_REGD_OUTDOOR, value);
 	} else {
 		skw_dbg("unsupport key: %s\n", key);
 	}
@@ -462,7 +452,10 @@ static int skw_band_parser(struct skwifi_cfg *config, char *key, char *value)
 
 static int skw_mib_parser(struct skwifi_cfg *config, char *key, char *value)
 {
-	long id, val;
+	u16 id;
+	long val;
+	long long number;
+	int ret;
 	struct list_head *head = NULL;
 	char *at = NULL, *endp = NULL;
 	struct skw_mib_data *md = NULL;
@@ -473,11 +466,11 @@ static int skw_mib_parser(struct skwifi_cfg *config, char *key, char *value)
 	if (!at)
 		return -EINVAL;
 
-	id = skw_simple_strtol(at + 1, &endp, 0);
-	if (*endp != '\0')
-		return -EINVAL;
+	ret = kstrtou16(at + 1, 0, &id);
+	if (ret)
+		return ret;
 
-#define SKW_IS_START_WITH(s,ref) (!memcmp(s, ref, strlen(ref)))
+#define SKW_IS_START_WITH(s,ref) (!strncmp(s, ref, strlen(ref)))
 	if (SKW_IS_START_WITH(key, "init@"))
 		head = &mib->init;
 	else if (SKW_IS_START_WITH(key, "sta@"))
@@ -511,34 +504,37 @@ static int skw_mib_parser(struct skwifi_cfg *config, char *key, char *value)
 
 		type = SKW_TYPE_STRING;
 	} else {
-		val = skw_simple_strtol(value, &endp, 0);
-		if (*endp != '/')
-			return -EINVAL;
+		*endp = '\0';
+		ret = kstrtoll(value, 0, &number);
+		*endp = '/';
+		if (ret)
+			return ret;
 
 		if (SKW_IS_STRING(endp + 1, "s8")) {
-			if (val >= -127 && val <= 128)
+			if (number >= -128 && number <= 127)
 				type = SKW_TYPE_S8;
 		} else if (SKW_IS_STRING(endp + 1, "s16")) {
-			if (val >= -32767 && val <= 32768)
+			if (number >= -32768 && number <= 32767)
 				type = SKW_TYPE_S16;
 		} else if (SKW_IS_STRING(endp + 1, "s32")) {
-			if (val >= -2147483647 && val <= 2147483648)
+			if (number >= -2147483648LL && number <= 2147483647LL)
 				type = SKW_TYPE_S32;
 		} else if (SKW_IS_STRING(endp + 1, "u8")) {
-			if (val >= 0 && val <= 0xff)
+			if (number >= 0 && number <= 0xff)
 				type = SKW_TYPE_U8;
 		} else if (SKW_IS_STRING(endp + 1, "u16")) {
-			if (val >= 0 && val <= 0xffff)
+			if (number >= 0 && number <= 0xffff)
 				type = SKW_TYPE_U16;
 		} else if (SKW_IS_STRING(endp + 1, "u32")) {
-			if (val >= 0 && val <= 0xffffffff)
+			if (number >= 0 && number <= 0xffffffffLL)
 				type = SKW_TYPE_U32;
 		} else if (SKW_IS_STRING(endp + 1, "bool")) {
-			if (val == 0 ||  val == 1)
+			if (number == 0 ||  number == 1)
 				type = SKW_TYPE_BOOL;
 		} else {
 			type = SKW_TYPE_INVALID;
 		}
+		val = (long)number;
 	}
 #undef SKW_IS_STRING
 
@@ -701,7 +697,8 @@ void skw_config_init(struct skw_config *conf)
 	conf->global.reorder_timeout = 100;
 
 	/* interface */
-	strcpy(conf->intf.interface[0].name, "wlan%d");
+	strscpy(conf->intf.interface[0].name, "wlan%d",
+		sizeof(conf->intf.interface[0].name));
 	conf->intf.interface[0].inst = SKW_INVALID_ID;
 	conf->intf.interface[0].iftype = NL80211_IFTYPE_STATION;
 
@@ -718,7 +715,7 @@ void skw_config_init(struct skw_config *conf)
 	conf->regd.country[1] = '0';
 
 	/* calib */
-	strcpy(conf->calib.project, "SEEKWAVE");
+	strscpy(conf->calib.project, "SEEKWAVE", sizeof(conf->calib.project));
 
 	INIT_LIST_HEAD(&conf->mib.init);
 	INIT_LIST_HEAD(&conf->mib.sta);
@@ -745,7 +742,8 @@ void skw_config_init(struct skw_config *conf)
 #ifdef CONFIG_SWT6621S_LEGACY_P2P
 	set_bit(SKW_CFG_FLAG_P2P_DEV, &conf->global.flags);
 
-	strcpy(conf->intf.interface[3].name, "p2p%d");
+	strscpy(conf->intf.interface[3].name, "p2p%d",
+		sizeof(conf->intf.interface[3].name));
 	conf->intf.interface[3].inst = 3;
 	conf->intf.interface[3].iftype = NL80211_IFTYPE_P2P_DEVICE;
 #endif
@@ -770,15 +768,19 @@ void skw_config_init(struct skw_config *conf)
 #endif
 
 #ifdef CONFIG_SWT6621S_CHIP_ID
-	if (strlen(CONFIG_SWT6621S_CHIP_ID))
-		strncpy(conf->calib.chip_alias_name, CONFIG_SWT6621S_CHIP_ID,
-			sizeof(conf->calib.chip_alias_name) - 1);
+	if (strlen(CONFIG_SWT6621S_CHIP_ID)) {
+		memset(conf->calib.chip_alias_name, 0, sizeof(conf->calib.chip_alias_name));
+		strscpy(conf->calib.chip_alias_name, CONFIG_SWT6621S_CHIP_ID,
+			sizeof(conf->calib.chip_alias_name));
+	}
 #endif
 
 #ifdef CONFIG_SWT6621S_PROJECT_NAME
-	if (strlen(CONFIG_SWT6621S_PROJECT_NAME))
-		strncpy(conf->calib.project, CONFIG_SWT6621S_PROJECT_NAME,
-			sizeof(conf->calib.project) - 1);
+	if (strlen(CONFIG_SWT6621S_PROJECT_NAME)) {
+		memset(conf->calib.project, 0, sizeof(conf->calib.project));
+		strscpy(conf->calib.project, CONFIG_SWT6621S_PROJECT_NAME,
+			sizeof(conf->calib.project));
+	}
 #endif
 
 #ifdef CONFIG_SWT6621S_WDS

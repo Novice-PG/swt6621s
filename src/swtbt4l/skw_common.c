@@ -37,44 +37,6 @@
 #include "skw_common.h"
 #include "skw_btsnoop.h"
 
-/* simple_strtol() is not available to modules any more; local compatible
- * implementation (only base-10, no endp is used by this driver). */
-static long skw_simple_strtol(const char *cp, char **endp, unsigned int base)
-{
-	long result = 0;
-	const char *p = cp;
-	int negate = 0;
-
-	if (*cp == '-') {
-		negate = 1;
-		p = cp + 1;
-	}
-	if (!base)
-		base = (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) ? 16 : (p[0] == '0' ? 8 : 10);
-	if (base == 16 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
-		p += 2;
-	while (*p) {
-		int digit;
-		if (*p >= '0' && *p <= '9')
-			digit = *p - '0';
-		else if (*p >= 'a' && *p <= 'f')
-			digit = *p - 'a' + 10;
-		else if (*p >= 'A' && *p <= 'F')
-			digit = *p - 'A' + 10;
-		else
-			break;
-		if (digit >= base)
-			break;
-		result = result * base + digit;
-		p++;
-	}
-	if (endp)
-		*endp = (char *)p;
-	if (p == cp || (negate && p == cp + 1))
-		return 0;
-	return negate ? -result : result;
-}
-
 #if ((BT_HCI_LOG_EN == 1) || (BT_CP_LOG_EN == 1))
 
 #define FILE_RW_ENABLE
@@ -289,22 +251,6 @@ char skw_get_bd_addr(unsigned char *buffer)
 EXPORT_SYMBOL_GPL(skw_get_bd_addr);
 
 
-
-char *skw_strchr(char *str, const char ch)
-{
-    char *ptr = str;
-
-    while((ptr != NULL) && ((*ptr) != '\r') && ((*ptr) != '\n') && ((*ptr) != 0))
-    {
-        if((*ptr) == ch)
-        {
-            return ptr;
-        }
-        ptr ++;
-    }
-    return NULL;
-}
-
 int skw_strlen(char *str)
 {
     char *ptr = str;
@@ -343,22 +289,24 @@ EXPORT_SYMBOL_GPL(skw_char2hex);
 */
 char *skwbt_config_get_uint8(char *data_str, uint8_t *value)
 {
-    char *split0 = skw_strchr(data_str, ';');
-    uint8_t len = 0;
-    char buffer[8] = {0};
-    if((split0 == NULL) || (split0 == data_str))
-    {
-        return NULL;
-    }
-    len = split0 - data_str;
-    if(len > 4)//invalid
-    {
-        SKWBT_INFO("%s, invalid str , %s", __func__, data_str);
-        return NULL;
-    }
-    memcpy(buffer, data_str, len);
-    *value = (int)skw_simple_strtol(buffer, NULL, 10);
-    return split0 + 1;//skip ;
+	char *end;
+	char buffer[8];
+	size_t len;
+
+	if (!data_str || !value)
+		return NULL;
+	end = data_str + strcspn(data_str, ";\r\n");
+	if (*end != ';')
+		return NULL;
+	len = end - data_str;
+	if (!len || len >= sizeof(buffer))
+		return NULL;
+	memcpy(buffer, data_str, len);
+	buffer[len] = '\0';
+	if (kstrtou8(buffer, 10, value))
+		return NULL;
+
+	return end + 1;
 }
 
 void skw_parse_wakeup_adv_conf(char *data_str, Wakeup_ADV_Info_St *wakeup_adv_info)
@@ -449,4 +397,3 @@ void skw_parse_wakeup_adv_conf(char *data_str, Wakeup_ADV_Info_St *wakeup_adv_in
 }
 
 EXPORT_SYMBOL_GPL(skw_parse_wakeup_adv_conf);
-

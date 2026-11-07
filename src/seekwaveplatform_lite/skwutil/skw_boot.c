@@ -18,10 +18,9 @@
 #include <linux/irq.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
-#include <linux/of_gpio.h>
 #include <linux/completion.h>
 #include <linux/moduleparam.h>
 #include <linux/workqueue.h>
@@ -33,6 +32,7 @@
 #include <linux/ctype.h>
 #include <linux/errno.h>
 #include <linux/firmware.h>
+#include <linux/skw_firmware.h>
 #include <linux/mmc/sdio_func.h>
 #include <linux/dma-mapping.h>
 #include <linux/cdev.h>
@@ -51,10 +51,20 @@ unsigned char dl_signal_acount=0;
 struct platform_device *btboot_pdev;
 static u64 port_dmamask = DMA_BIT_MASK(32);
 static struct mutex boot_mutex;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+static bool skw_boot_ready;
+
+bool skw_boot_is_ready(void)
+{
+	return smp_load_acquire(&skw_boot_ready);
+}
+#endif
 static char *local_chip_id = "SV6160LITE";
-int g_chipen_pin = -1;
-static int chip_enable = 0;
-module_param(chip_enable, int, S_IRUGO);
+
+static char *firmware_dir = "";
+module_param(firmware_dir, charp, 0444);
+MODULE_PARM_DESC(firmware_dir, "Firmware subdirectory within the standard firmware search paths");
+
 #ifdef CONFIG_SKW_HOST_PLATFORM_NT
 int skw_use_sdma = 1;//1:sdma
 #else
@@ -63,9 +73,6 @@ int skw_use_sdma = 0;//default use adma, 0:adma 1:sdma
 
 //static char iram_image_buffer[360448];
 //static char dram_image_buffer[206848];
-#ifdef CONFIG_OF
-#undef CONFIG_OF
-#endif
 //#define SDIO_BUFFER_SIZE	 (16*1024)
 /*
  *add the little endian
@@ -153,7 +160,8 @@ static int skw_request_firmwares(struct seekwave_device *boot_data,
 	const struct firmware *fw = NULL;
 
 	skwboot_log("request_firmware %s\n", dram_image_name);
-	ret = request_firmware(&fw, dram_image_name, NULL);
+	ret = skw_firmware_request(&fw, dram_image_name, NULL,
+				   firmware_dir, request_firmware);
 	if (ret < 0) {
 		skwboot_err("request_firmware %s fail\n", dram_image_name);
 		goto ret;
@@ -177,7 +185,8 @@ static int skw_request_firmwares(struct seekwave_device *boot_data,
 	boot_data->dram_crc_val = crc_16_l_calc(boot_data->dram_img_data + boot_data->dram_crc_offset, boot_data->dram_dl_size);
 
 	skwboot_log("request_firmware %s\n", iram_image_name);
-	ret = request_firmware(&fw, iram_image_name, NULL);
+	ret = skw_firmware_request(&fw, iram_image_name, NULL,
+				   firmware_dir, request_firmware);
 	if (ret < 0) {
 		skwboot_err("request_firmware %s fail\n", iram_image_name);
 		goto ret;
@@ -208,7 +217,8 @@ static int skw_request_firmwares(struct seekwave_device *boot_data,
 		goto ret;
 	}
 	skwboot_log("request_firmware %s\n", nv_mem_name);
-	ret = firmware_request_nowarn(&fw, nv_mem_name, NULL);
+	ret = skw_firmware_request(&fw, nv_mem_name, NULL,
+				   firmware_dir, firmware_request_nowarn);
 	if (ret < 0) {
 		pr_debug("[SKWBOOT]: optional NV %s not present\n", nv_mem_name);
 		ret = ENOENT;
@@ -243,161 +253,73 @@ relese_fw:
 ret:
 	return ret;
 }
-static int skw_of_property_read(const struct device_node *np,
-				const char *propname, u32 *out_value)
+/* Wake GPIOs are accessed in hard IRQ and with local interrupts disabled. */
+static struct gpio_desc *skw_get_gpio(struct device *dev, const char *name)
 {
-#if KERNEL_VERSION(3, 1, 0) <= LINUX_VERSION_CODE
-	return of_property_read_u32(np,	propname, out_value);
-#else
-#if 0
-	const unsigned int *value=NULL;
-	value = of_get_property(np, propname,out_value);
-	if (value == NULL){
-		return ENXIO;
-	}else{
-	    return 0;
+	struct gpio_desc *desc;
+
+	desc = devm_gpiod_get_optional(dev, name, GPIOD_ASIS);
+	if (IS_ERR_OR_NULL(desc))
+		return desc;
+	if (gpiod_cansleep(desc)) {
+		dev_err(dev, "%s GPIO must support atomic access\n", name);
+		return ERR_PTR(-EINVAL);
 	}
-#endif
-	return ENXIO;
-#endif
+	return desc;
 }
-static int seekwave_boot_parse_dt(struct platform_device *pdev, struct seekwave_device *boot_data)
+
+static int seekwave_boot_parse_dt(struct platform_device *pdev,
+				 struct seekwave_device *data)
 {
-	int ret = 0;
+	struct device *dev = &pdev->dev;
+	unsigned int mode = test_debug & 0xf;
+	int ret;
 
-/* enum of_gpio_flags and of_get_named_gpio_flags() were removed in Linux 6.3 */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
-	enum of_gpio_flags flags;
-#endif
-	int tmp_gpio;
-	struct device_node *np = pdev->dev.of_node;
-	/*add the dma type dts config*/
-	if (skw_of_property_read(np, "bt_antenna", &(boot_data->bt_antenna))){
-		skwboot_warn("no BT_antenna setting\n");
-		boot_data->bt_antenna = SKW_BT_ANTENNA_CFG;
-	} else
-		skwboot_log("BT_antenna setting: %d\n", boot_data->bt_antenna);
+	if (of_property_read_u32(dev->of_node, "bt_antenna", &data->bt_antenna))
+		data->bt_antenna = SKW_BT_ANTENNA_CFG;
+	data->dma_type = skw_use_sdma ? SDMA : ADMA;
 
-	if (skw_of_property_read(np, "dma_type", &(boot_data->dma_type))){
-		boot_data->dma_type = SKW_DMA_TYPE_CFG;
-		g_chipen_pin = boot_data->chip_en = MODEM_ENABLE_GPIO;
-		boot_data->host_gpio =  HOST_WAKEUP_GPIO_IN;
-		boot_data->chip_gpio =  MODEM_WAKEUP_GPIO_OUT;
-		skwboot_warn("no DTS setting\n");
-	} else {
-	
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
-		boot_data->host_gpio = of_get_named_gpio_flags(
-			np, "gpio_host_wake", 0, &flags);
-		boot_data->chip_gpio = of_get_named_gpio_flags(
-			np, "gpio_chip_wake", 0, &flags);
-		g_chipen_pin = boot_data->chip_en =
-			of_get_named_gpio_flags(np, "gpio_chip_en", 0, &flags);
-#else
-		/* Linux 6.3 removed of_get_named_gpio_flags() and enum of_gpio_flags;
-		 * of_get_named_gpio() returns the same descriptor, the (unused here)
-		 * flags argument no longer exists. */
-		boot_data->host_gpio =
-			of_get_named_gpio(np, "gpio_host_wake", 0);
-		boot_data->chip_gpio =
-			of_get_named_gpio(np, "gpio_chip_wake", 0);
-		g_chipen_pin = boot_data->chip_en =
-			of_get_named_gpio(np, "gpio_chip_en", 0);
-#endif
+	if (mode != 1 && test_debug != 5) {
+		data->host_wake = skw_get_gpio(dev, "host-wake");
+		if (IS_ERR(data->host_wake))
+			return PTR_ERR(data->host_wake);
 	}
-	boot_data->dma_type = skw_use_sdma?SDMA:ADMA;
-	if (chip_enable) {
-		boot_data->chip_en = chip_enable;
-		g_chipen_pin = chip_enable;
+	if (mode != 1) {
+		data->chip_wake = skw_get_gpio(dev, "chip-wake");
+		if (IS_ERR(data->chip_wake))
+			return PTR_ERR(data->chip_wake);
 	}
-	skwboot_log("%s,modem boot setting::=>\n", __func__);
-	skwboot_log("chipen=%d\n", boot_data->chip_en);
-	skwboot_log("hst_wak_wf=%d\n", boot_data->chip_gpio);
-	skwboot_log("wf_wak_hst=%d\n", boot_data->host_gpio);
-	skwboot_log("dma_type=%d\n", boot_data->dma_type);
-	skwboot_log("bt_antenna=%d\n", boot_data->bt_antenna);
-
-	if (test_debug) {
-		if ((test_debug & 0xF) == 0x1) {
-			boot_data->chip_gpio = -1;
-			boot_data->host_gpio = -1;
-		} else if (test_debug == 5)
-			boot_data->host_gpio = -1;
-		else if ((test_debug & 0xF) == 6){
-			boot_data->chip_en  = -1;
-			g_chipen_pin = boot_data->chip_en;
-		}
-
-
-#if KERNEL_VERSION(3, 1, 0) <= LINUX_VERSION_CODE
-		if (boot_data->host_gpio >= 0) {
-			if ((test_debug & 0xF) == 0x2) {
-				skwboot_log("gpio in out swap\n");
-				tmp_gpio = boot_data->chip_gpio;
-				boot_data->chip_gpio = boot_data->host_gpio;
-				boot_data->host_gpio = tmp_gpio;
-				ret = devm_gpio_request_one(
-					&pdev->dev, boot_data->host_gpio,
-					GPIOF_IN, "WL_WAKE_HOST");
-			} else if ((test_debug & 0xF) == 0x3) {
-				skwboot_log("test_debug 3 = gpio in high\n");
-				ret = devm_gpio_request_one(
-					&pdev->dev, boot_data->host_gpio,
-					GPIOF_OUT_INIT_HIGH, "WL_WAKE_HOST");
-			} else if ((test_debug & 0xF) == 0x4) {
-				skwboot_log(
-					"test_debug 4 = gpio in out swap out low\n");
-				tmp_gpio = boot_data->chip_gpio;
-				boot_data->chip_gpio = boot_data->host_gpio;
-				boot_data->host_gpio = tmp_gpio;
-				ret = devm_gpio_request_one(
-					&pdev->dev, boot_data->host_gpio,
-					GPIOF_OUT_INIT_LOW, "WL_WAKE_HOST");
-			} else {
-				ret = devm_gpio_request_one(
-					&pdev->dev, boot_data->host_gpio,
-					GPIOF_IN, "WL_WAKE_HOST");
-			}
-			if (boot_data->chip_gpio >= 0)
-				ret = devm_gpio_request_one(
-					&pdev->dev, boot_data->chip_gpio,
-					GPIOF_OUT_INIT_HIGH, "HOST_WAKE_WL");
-		}
-#endif
-		if (boot_data->chip_gpio >= 0 && boot_data->host_gpio >= 0) {
-			if (test_debug & 0xF0)
-				boot_data->slp_disable = 1;
-			else
-				boot_data->slp_disable = 0;
-		} else {
-			boot_data->slp_disable = 1;
-		}
-	} else {
-#if KERNEL_VERSION(3, 1, 0) <= LINUX_VERSION_CODE
-		if (boot_data->host_gpio >= 0)
-			ret = devm_gpio_request_one(&pdev->dev,
-						    boot_data->host_gpio,
-						    GPIOF_IN, "WL_WAKE_HOST");
-		if (boot_data->chip_gpio >= 0)
-			ret = devm_gpio_request_one(&pdev->dev,
-						    boot_data->chip_gpio,
-						    GPIOF_OUT_INIT_HIGH,
-						    "HOST_WAKE_WL");
-#endif
-		if (boot_data->chip_gpio >= 0 && boot_data->host_gpio >= 0) {
-			boot_data->slp_disable = 0;
-		} else {
-			boot_data->slp_disable = 1;
-		}
+	if (mode != 6) {
+		data->enable_gpio = skw_get_gpio(dev, "chip-en");
+		if (IS_ERR(data->enable_gpio))
+			return PTR_ERR(data->enable_gpio);
 	}
-#if KERNEL_VERSION(3, 1, 0) <= LINUX_VERSION_CODE
-	if (boot_data->chip_en >= 0)
-		ret = devm_gpio_request_one(&pdev->dev, boot_data->chip_en, GPIOF_OUT_INIT_HIGH,"CHIP_EN");
-#endif
-	skwboot_log("%s,chipen=%d, gpio_out:%d gpio_in:%d ret = %d\n", __func__,
-		    boot_data->chip_en, boot_data->chip_gpio,
-		    boot_data->host_gpio, ret);
-	return ret;
+
+	if (data->host_wake && (mode == 2 || mode == 4))
+		swap(data->host_wake, data->chip_wake);
+
+	if (data->host_wake) {
+		if (mode == 3 || mode == 4)
+			ret = gpiod_direction_output(data->host_wake, mode == 3);
+		else
+			ret = gpiod_direction_input(data->host_wake);
+		if (ret)
+			return ret;
+	}
+	if (data->chip_wake) {
+		ret = gpiod_direction_output(data->chip_wake, 1);
+		if (ret)
+			return ret;
+	}
+	if (data->enable_gpio) {
+		ret = gpiod_direction_output(data->enable_gpio, 1);
+		if (ret)
+			return ret;
+	}
+
+	data->slp_disable = !data->host_wake || !data->chip_wake ||
+			    (test_debug & 0xf0);
+	return 0;
 }
 
 /************************************************************************/
@@ -469,16 +391,22 @@ static int seekwave_boot_probe(struct  platform_device *pdev)
 	int ret;
 	int time_count=0;
 	struct device *io_bus;
+	struct seekwave_device *data;
 
+	if (boot_data)
+		return -EBUSY;
 	if (pdev != &seekwave_device)
 		seekwave_device.name = NULL;
-	boot_data = devm_kzalloc(&pdev->dev, sizeof(struct seekwave_device), GFP_KERNEL);
-	if (!boot_data) {
+	data = devm_kzalloc(&pdev->dev, sizeof(*data), GFP_KERNEL);
+	if (!data) {
 		skwboot_err("%s :kzalloc error !\n", __func__);
 		return -ENOMEM;
 	}
+	ret = seekwave_boot_parse_dt(pdev, data);
+	if (ret)
+		return ret;
+	boot_data = data;
 	mutex_init(&boot_mutex);
-	seekwave_boot_parse_dt(pdev, boot_data);
 	io_bus = skw_get_bus_dev();
 	if (!io_bus) {
 		skwboot_log("%s :CHIP_RESET AGAIN!\n", __func__);
@@ -489,9 +417,9 @@ static int seekwave_boot_probe(struct  platform_device *pdev)
 		} while(!io_bus && time_count++ < 50);
 	}
 	if (!io_bus) {
-		devm_kfree(&pdev->dev, boot_data);
 		skwboot_err("%s get bus dev fail !\n",__func__);
-		return -ENODEV;
+		ret = -ENODEV;
+		goto free_boot_data;
 	}
 	//get chip id
 	if (!strncmp(local_chip_id,"SV6160LITE",10)) {
@@ -537,12 +465,30 @@ static int seekwave_boot_probe(struct  platform_device *pdev)
 	ret = skw_boot_init(boot_data);
 	if (ret < 0) {
 		skwboot_err("%s:boot init fail\n", __func__);
-		return -1;
+		goto free_images;
 	}
 	boot_data->pdev = pdev;
 	ret = skw_first_boot(boot_data);
-	if (!ret && strncmp(io_bus->bus->name, "usb", 3))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+	/* Child probes may run before the initial firmware download completes. */
+	smp_store_release(&skw_boot_ready, !ret);
+#endif
+	if (ret) {
+		skw_boot_abort();
+		goto free_images;
+	}
+	if (strncmp(io_bus->bus->name, "usb", 3))
 		skw_bind_boot_driver(io_bus);
+	return 0;
+
+free_images:
+	vfree(boot_data->iram_img_data);
+	vfree(boot_data->dram_img_data);
+	kfree(boot_data->nv_mem_data);
+free_boot_data:
+	mutex_destroy(&boot_mutex);
+	devm_kfree(&pdev->dev, boot_data);
+	boot_data = NULL;
 	return ret;
 }
 /***************************************************************************
@@ -552,13 +498,16 @@ static int seekwave_boot_probe(struct  platform_device *pdev)
  *Date:
  *Modify:
  **************************************************************************/
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 static void seekwave_boot_remove(struct  platform_device *pdev)
 #else
 static int seekwave_boot_remove(struct  platform_device *pdev)
 #endif
 {
 	skwboot_log("%s the Enter \n", __func__);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+	smp_store_release(&skw_boot_ready, false);
+#endif
 
 	if (btboot_pdev) {
 		platform_device_unregister(btboot_pdev);
@@ -600,7 +549,7 @@ static int seekwave_boot_remove(struct  platform_device *pdev)
 		skwboot_err("%s:boot_data is NULL\n", __func__);
 	}
 	mutex_destroy(&boot_mutex);
-	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 15)
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 	return;
 	#else
 	return 0;
@@ -627,34 +576,21 @@ static struct platform_driver seekwave_driver ={
 		.owner = THIS_MODULE,
 		.name  = CHIP_DEV_NAME,
 		.of_match_table = seekwave_match_table,
+		/* The transport retains boot resources until it has stopped. */
+		.suppress_bind_attrs = true,
 	},
 	.probe = seekwave_boot_probe,
 	.remove = seekwave_boot_remove,
 	.shutdown = seekwave_boot_shutdown,
 };
 
-/***********************************************************************
- *Description:chipen gpio pin reset
- *Seekwave tech LTD
- *Author:zongqiang.cheng
- *Date:2025-3-18
- *Modify:
- ***********************************************************************/
-int skw_chipen_gpio_reset(int on)
+/* Logical 1 enables the chip; logical 0 disables it. */
+int skw_chip_enable_set(int on)
 {
-	int chip_en = g_chipen_pin;
-	if (chip_en < 0){
-		printk("chip_en need set !!\n");
-		return -1;
-	}
+	if (!boot_data || !boot_data->enable_gpio)
+		return -ENODEV;
 
-	if(on) {
-		gpio_set_value(chip_en, 1);
-		printk("seekwave power on !!\n");
-	} else {
-		gpio_set_value(chip_en, 0);
-		printk("seekwave power down !!\n");
-	}
+	gpiod_set_value(boot_data->enable_gpio, !!on);
 	return 0;
 }
 
@@ -667,38 +603,49 @@ int skw_chipen_gpio_reset(int on)
  ***********************************************************************/
 static int get_sleep_status(int portno, char *buffer, int size)
 {
-	memcpy(buffer, "WAKE", 4);
-	if (boot_data->host_gpio >=0) {
-		if (gpio_get_value(boot_data->host_gpio) == 0)
-			memcpy(buffer, "DOWN", 4);
+	int value = 1;
+
+	if (!boot_data || size < 4)
+		return -EINVAL;
+	if (boot_data->host_wake) {
+		value = gpiod_get_value(boot_data->host_wake);
+		if (value < 0)
+			return value;
 	}
+	memcpy(buffer, value ? "WAKE" : "DOWN", 4);
 	return 4;
 }
+
 static int set_sleep_status(int portno, char *buffer, int size)
 {
-	int i, count;
+	int attempt, count, value;
 
-	for(i=0; i<2; i++) {
-		if (gpio_get_value(boot_data->host_gpio))
+	if (!boot_data || !boot_data->host_wake || !boot_data->chip_wake)
+		return -ENODEV;
+	for (attempt = 0; attempt < 2; attempt++) {
+		value = gpiod_get_value(boot_data->host_wake);
+		if (value < 0)
+			return value;
+		if (value)
 			return 1;
-		if(buffer && !strncmp(buffer, "WAKE", 4)) {
-			gpio_set_value(boot_data->chip_gpio, 0);
+		if (buffer && size >= 4 && !memcmp(buffer, "WAKE", 4)) {
+			gpiod_set_value(boot_data->chip_wake, 0);
 			udelay(10);
-			gpio_set_value(boot_data->chip_gpio, 1);
+			gpiod_set_value(boot_data->chip_wake, 1);
 		}
-		count = 0;
-		do {
-			if (count++ < 100)
-				udelay(20);
-		} while(gpio_get_value(boot_data->host_gpio) ==0);
-		if (gpio_get_value(boot_data->host_gpio))
-			return 1;
+		for (count = 0; count < 100; count++) {
+			udelay(20);
+			value = gpiod_get_value(boot_data->host_wake);
+			if (value < 0)
+				return value;
+			if (value)
+				return 1;
+		}
 		udelay(100);
 	}
-	if (gpio_get_value(boot_data->host_gpio)==0)
-		skwboot_log("wakeup CHIP timeout!!! \n");
-	return 1;
+	return -ETIMEDOUT;
 }
+
 struct sv6160_platform_data boot_pdata = {
 	.data_port = 8,
 	.bus_type = SDIO_LINK,
@@ -799,12 +746,6 @@ static int skw_download_signal_ops(void)
 	boot_data->dl_done_signal = 0xff&tmp_signal;
 	boot_data->dl_acount_addr = SKW_SDIO_PD_DL_AP2CP_BSP;
 
-	//gpio need set high or low power interrupt to cp wakeup
-	boot_data->gpio_out = boot_data->chip_gpio;
-	if(boot_data->gpio_val)
-		boot_data->gpio_val =0;
-	else
-		boot_data->gpio_val =1;
 	skwboot_log("%s line:%d download data ops done the dl_count=%d \n", __func__, __LINE__,boot_data->dl_done_signal);
 	return 0;
 }
@@ -1097,13 +1038,6 @@ int skw_stop_wifi_service(void)
 	boot_data->dl_module = 0;
 	boot_data->first_dl_flag = 1;
 #endif
-	//download done flag ++
-	//gpio need set high or low power interrupt to cp wakeup
-	boot_data->gpio_out = boot_data->chip_gpio;
-	if(boot_data->gpio_val)
-		boot_data->gpio_val =0;
-	else
-		boot_data->gpio_val =1;
 	ret = skw_boot_loader(boot_data);
 	mutex_unlock(&boot_mutex);
 	if(ret !=0)
@@ -1170,14 +1104,7 @@ static int skw_stop_bt_service(void)
 	boot_data->dl_module = 0;
 	boot_data->first_dl_flag = 1;
 #endif
-	//download done flag ++
 	boot_data->dl_module = NONE_BOOT;
-	//gpio need set high or low power interrupt to cp wakeup
-	boot_data->gpio_out = boot_data->chip_gpio;
-	if(boot_data->gpio_val)
-		boot_data->gpio_val =0;
-	else
-		boot_data->gpio_val =1;
 	ret = skw_boot_loader(boot_data);
 	mutex_unlock(&boot_mutex);
 	if(ret !=0)
@@ -1212,11 +1139,8 @@ static int skw_first_boot(struct seekwave_device *boot_data)
 	//set download the value;
 	boot_data->service_ops = SKW_NO_SERVICE;
 	boot_data->save_setup_addr = SKW_SDIO_PD_DL_AP2CP_BSP; //160
-	boot_data->gpio_out = boot_data->chip_gpio;
-	boot_data->gpio_val = 0;
 	boot_data->dl_module = 0;
 	boot_data->first_dl_flag =0;
-	boot_data->gpio_in  = boot_data->host_gpio;
 	boot_data->dma_type_addr = SKW_SDIO_PLD_DMA_TYPE;
 	boot_data->slp_disable_addr = SKW_SDIO_CP_SLP_SWITCH;
 	boot_data->wifi_start = skw_start_wifi_service;

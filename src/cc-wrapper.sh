@@ -20,7 +20,7 @@ for arg in "$@"; do
 	esac
 done
 
-if ! "$needs_alignment"; then
+if [[ "$needs_alignment" == false ]]; then
 	exec "$real_cc" "$@"
 fi
 

@@ -81,6 +81,7 @@ static struct completion loop_completion;
 static BLOCKING_NOTIFIER_HEAD(modem_notifier_list);
 static struct gpio_desc *chip_enable;
 static int host_wake_irq = -1;
+static bool host_wake_irq_enabled;
 static int modem_status;
 static int usb_speed_switching;
 static int cls_recovery_mode_en;
@@ -2451,7 +2452,10 @@ void skw_boot_abort(void)
 {
 	/* First-boot errors occur before download work has been queued. */
 	if (host_wake_irq >= 0) {
-		disable_irq_wake(host_wake_irq);
+		if (host_wake_irq_enabled) {
+			disable_irq_wake(host_wake_irq);
+			host_wake_irq_enabled = false;
+		}
 		free_irq(host_wake_irq, NULL);
 		host_wake_irq = -1;
 	}
@@ -2469,7 +2473,7 @@ int skw_boot_loader(struct seekwave_device *boot_data)
 	cur_time = ktime_get();
 #endif
 	if (host_wake_irq < 0 && boot_data->host_wake) {
-		int irq;
+		int irq, wake_ret;
 		unsigned long flags;
 
 		irq = gpiod_to_irq(boot_data->host_wake);
@@ -2481,11 +2485,12 @@ int skw_boot_loader(struct seekwave_device *boot_data)
 				  "skw-host-wake", NULL);
 		if (ret)
 			return ret;
-		ret = enable_irq_wake(irq);
-		if (ret) {
-			free_irq(irq, NULL);
-			return ret;
-		}
+		wake_ret = enable_irq_wake(irq);
+		if (wake_ret)
+			skw_usb_warn("host-wake IRQ %d cannot wake the system: %d\n",
+				     irq, wake_ret);
+		else
+			host_wake_irq_enabled = true;
 		host_wake_irq = irq;
 	}
 	usb_boot_data = boot_data;
@@ -2894,7 +2899,10 @@ static void __exit skw_usb_io_exit(void)
 	usb_deregister(&skw_usb_io_driver);
 	/* Disconnect and IRQ callbacks can schedule work. */
 	if (host_wake_irq >= 0) {
-		disable_irq_wake(host_wake_irq);
+		if (host_wake_irq_enabled) {
+			disable_irq_wake(host_wake_irq);
+			host_wake_irq_enabled = false;
+		}
 		free_irq(host_wake_irq, NULL);
 		host_wake_irq = -1;
 	}

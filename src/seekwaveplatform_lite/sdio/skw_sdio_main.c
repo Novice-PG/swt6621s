@@ -293,11 +293,11 @@ static int skw_sdio_request_host_irq(irq_handler_t handler)
 
 	skw_sdio->irq_num = irq;
 	ret = enable_irq_wake(irq);
-	if (ret) {
-		skw_sdio_free_host_irq(skw_sdio);
-		return ret;
-	}
-	skw_sdio->irq_wake_enabled = true;
+	if (ret)
+		skw_sdio_warn("host-wake IRQ %d cannot wake the system: %d\n",
+			      irq, ret);
+	else
+		skw_sdio->irq_wake_enabled = true;
 	return 0;
 }
 

@@ -23,7 +23,7 @@ time; loading ~30 s after kernel start works every time.
 | File | Installed to | Purpose |
 |---|---|---|
 | `blacklist-swt6621s.conf` | `/etc/modprobe.d/` | stop udev alias autoload (`modprobe` by name still works) |
-| `swt6621s-wifi.service` | `/etc/systemd/system/` | `modprobe skw_sdio_lite`, then `swt6621s_wifi`, then `skwbt` |
+| `swt6621s-wifi.service` | `/etc/systemd/system/` | `modprobe skw_sdio_lite`, then `swt6621s_wifi`, then `skwbt` (refuses to run before 20 s uptime) |
 | `swt6621s-wifi.timer` | `/etc/systemd/system/` | fire the service 20 s after systemd starts |
 | `install.sh` | — | install/remove all of the above |
 
@@ -43,3 +43,26 @@ when activated on demand). In practice expect WiFi about 30–35 s after power-o
 
 Raising the value is harmless; lowering it below ~10 s is not tested and
 reintroduces the failure window.
+
+## First boot / WiFi presets
+
+Because wlan0 only appears ~30 s after power-on, anything that configures WiFi
+earlier will not see an interface. Armbian's `armbian-firstlogin` applies
+Imager presets before it prompts for anything, and it silently skips a WiFi
+preset when no wlan device exists yet.
+
+If you ship images with WiFi presets, start the unit from a profile.d script
+that runs before `armbian-check-first-login.sh` (both in `/etc/profile.d/`,
+the `00-` name sorts first):
+
+```sh
+[ -r /root/.not_logged_in_yet ] || return 0
+grep -q '^[[:space:]]*PRESET_NET_WIFI_ENABLED=1' /root/.not_logged_in_yet 2>/dev/null || return 0
+for d in /sys/class/net/wlan*; do [ -e "$d" ] && return 0; done
+systemctl start swt6621s-wifi.service >/dev/null 2>&1 || true
+return 0
+```
+
+This cannot load too early: the unit's `ExecStartPre` waits for 20 s of
+uptime regardless of who starts it. Interactive logins without a WiFi preset
+are not delayed.

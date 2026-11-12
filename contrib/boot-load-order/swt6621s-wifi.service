@@ -6,6 +6,10 @@ After=systemd-udev-settle.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# Hard floor: whoever starts this unit (timer, a first-login helper, an admin),
+# the modules are not touched before 20 s of uptime. Loading at ~1 s makes the
+# first CMD53 block write fail with -EBUSY and wedges the chip.
+ExecStartPre=/bin/sh -c 'u=$(cut -d. -f1 /proc/uptime); [ "$u" -ge 20 ] || sleep $((20-u))'
 # Order matters: skw_sdio_lite probes SDIO 1ffe:6621, boots the chip and
 # allocates the sv6621s_wireless1 / skwbt platform devices. The other two
 # drivers bind to those devices. Keep this order.

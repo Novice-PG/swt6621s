@@ -1,0 +1,14 @@
+[Unit]
+Description=Load SWT6621S WiFi/BT modules (delayed)
+# Do not start before the SDIO bus has been probed and udev has settled.
+After=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Order matters: skw_sdio_lite probes SDIO 1ffe:6621, boots the chip and
+# allocates the sv6621s_wireless1 / skwbt platform devices. The other two
+# drivers bind to those devices. Keep this order.
+ExecStart=/sbin/modprobe skw_sdio_lite
+ExecStart=/sbin/modprobe swt6621s_wifi
+ExecStart=/sbin/modprobe skwbt

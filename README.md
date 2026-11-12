@@ -13,6 +13,7 @@ also be used on other boards, such as the KickPi K3B.
 | `dkms.conf` | DKMS configuration (three modules) |
 | `packaging/build-debs.sh` | Builds the `swt6621s-dkms` and `swt6621s-firmware` packages |
 | `packaging/RELEASE-NOTES.md` | Release notes, `@VERSION@` is replaced by the tag |
+| `contrib/boot-load-order/` | Delayed-load fix for boards where loading at boot wedges the chip |
 | `.github/workflows/release.yml` | Builds and publishes the packages for a tag |
 
 The three modules built by DKMS are:
@@ -92,6 +93,23 @@ modprobe skw_sdio_lite
 modprobe swt6621s_wifi
 modprobe skwbt
 ```
+
+## Boot-time load order
+
+Do not load these modules from `modules-load.d` by default. On the KickPi K2B V2
+with mainline 6.18 kernels the module loader runs about one second after boot,
+while the SDIO controller is still settling. The first CMD53 block write of the
+firmware download then fails with `-EBUSY`, the chip stays wedged
+(`sv6160lite probe failed with error -16`) and the boot can stall.
+
+Load the stack ~20 s after boot instead, with udev autoload suppressed:
+
+```
+sudo contrib/boot-load-order/install.sh
+```
+
+See [`contrib/boot-load-order/README.md`](contrib/boot-load-order/README.md)
+for the log signatures and the measured timings.
 
 ## Provenance
 

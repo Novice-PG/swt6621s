@@ -1,0 +1,12 @@
+[Unit]
+Description=Delayed load of SWT6621S WiFi/BT
+
+[Timer]
+# OnBootSec is relative to the start of the system manager, not to power-on.
+# 20 s leaves the SDIO controller well past the window where the first CMD53
+# write fails with -EBUSY. Do not lower this to "save" a few seconds.
+OnBootSec=20s
+Unit=swt6621s-wifi.service
+
+[Install]
+WantedBy=timers.target
